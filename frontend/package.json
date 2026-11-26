@@ -177,6 +177,10 @@
     "pako": "^2.2.0",
     "tsconfck": {
       "typescript": "$typescript"
+    },
+    "basic-ftp": "^6.2.1",
+    "oxfmt": {
+      "tinypool": "^2.1.2"
     }
   },
   "msw": {
