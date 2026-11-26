@@ -18,7 +18,7 @@
     "@embedpdf/plugin-bookmark": "^2.15.1",
     "@embedpdf/plugin-document-manager": "^2.15.1",
     "@embedpdf/plugin-export": "^2.15.1",
-    "@embedpdf/plugin-history": "^2.15.1",
+    "@embedpdf/plugin-history": "^3.3.0",
     "@embedpdf/plugin-interaction-manager": "^2.15.1",
     "@embedpdf/plugin-pan": "^2.15.1",
     "@embedpdf/plugin-print": "^2.15.1",
