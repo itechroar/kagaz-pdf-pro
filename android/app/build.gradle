@@ -13,8 +13,20 @@ android {
         versionName '1.0.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
+    signingConfigs {
+        release {
+            def ks = System.getenv('KAGAZ_KEYSTORE_FILE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('KAGAZ_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KAGAZ_KEY_ALIAS')
+                keyPassword System.getenv('KAGAZ_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
-        release { minifyEnabled true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' }
+        release {
+            signingConfig System.getenv('KAGAZ_KEYSTORE_FILE') ? signingConfigs.release : signingConfigs.debug minifyEnabled true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' }
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = '17' }
