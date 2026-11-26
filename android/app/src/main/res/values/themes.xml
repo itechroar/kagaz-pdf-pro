@@ -1,3 +1,16 @@
 <resources>
-    <style name="Theme.Kagaz" parent="Theme.Material3.DayNight.NoActionBar" />
+    <style name="Theme.Kagaz" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorOnPrimary">@color/on_brand</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Kagaz.Medium</item>
+    </style>
+    <style name="ShapeAppearance.Kagaz.Medium" parent="ShapeAppearance.Material3.MediumComponent">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">12dp</item>
+    </style>
+    <style name="Theme.Kagaz.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/icon_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_fg</item>
+        <item name="postSplashScreenTheme">@style/Theme.Kagaz</item>
+    </style>
 </resources>

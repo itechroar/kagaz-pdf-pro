@@ -1,0 +1,16 @@
+<resources>
+    <string name="setup_title">अपने सर्वर से जुड़ें</string>
+    <string name="setup_subtitle">शुरू करने के लिए अपने Kagaz PDF सर्वर का पता दर्ज करें।</string>
+    <string name="server_label">सर्वर का पता</string>
+    <string name="server_helper">इंटरनेट वाले सर्वर के लिए https इस्तेमाल करें। सादा http केवल आपके अपने नेटवर्क पर चलता है।</string>
+    <string name="connect">जुड़ें</string>
+    <string name="bad_url">सही पता दर्ज करें। सादा http केवल लोकल या निजी नेटवर्क के सर्वर के लिए मान्य है।</string>
+    <string name="err_unreachable">इस सर्वर तक नहीं पहुँच सके। पता और इंटरनेट कनेक्शन जाँचें।</string>
+    <string name="err_tls">सुरक्षित कनेक्शन विफल रहा। सर्वर का प्रमाणपत्र भरोसेमंद नहीं है।</string>
+    <string name="load_error_title">आपका सर्वर लोड नहीं हो सका</string>
+    <string name="load_error_cert">सर्वर का प्रमाणपत्र भरोसेमंद नहीं है, इसलिए कनेक्शन रोका गया।</string>
+    <string name="retry">फिर कोशिश करें</string>
+    <string name="change_server">सर्वर बदलें</string>
+    <string name="reload">रीलोड</string>
+    <string name="open_browser">ब्राउज़र में खोलें</string>
+</resources>

@@ -3,31 +3,69 @@ package com.kagazsoftware.pdf
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
-import android.widget.Button
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
-import android.widget.TextView
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.textfield.TextInputLayout
+import java.util.concurrent.Executors
 
+/** First-run screen: validates the address, probes the server, then stores it and opens the app. */
 class SetupActivity : AppCompatActivity() {
+    private val worker = Executors.newSingleThreadExecutor()
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("kagaz", MODE_PRIVATE)
-        val saved = prefs.getString("server", null)
-        if (saved != null && intent.getBooleanExtra("change", false).not()) {
+        enableEdgeToEdge()
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val saved = prefs.getString(KEY_SERVER, null)
+        if (saved != null && !intent.getBooleanExtra(EXTRA_CHANGE, false)) {
             startActivity(Intent(this, MainActivity::class.java)); finish(); return
         }
         setContentView(R.layout.activity_setup)
+        findViewById<View>(R.id.root).applySystemInsetsPadding()
+        val layout = findViewById<TextInputLayout>(R.id.serverLayout)
         val input = findViewById<EditText>(R.id.serverUrl)
-        val error = findViewById<TextView>(R.id.error)
+        val button = findViewById<MaterialButton>(R.id.connect)
+        val checking = findViewById<LinearProgressIndicator>(R.id.checking)
         saved?.let { input.setText(it) }
-        findViewById<Button>(R.id.connect).setOnClickListener {
+
+        fun connect() {
+            layout.error = null
             val url = ServerUrl.normalize(input.text.toString())
-            if (url == null) {
-                error.setText(R.string.bad_url); error.visibility = View.VISIBLE
-            } else {
-                prefs.edit().putString("server", url).apply()
-                startActivity(Intent(this, MainActivity::class.java)); finish()
+            if (url == null) { layout.error = getString(R.string.bad_url); return }
+            button.isEnabled = false; checking.visibility = View.VISIBLE
+            worker.execute {
+                val result = ServerCheck.probe(url)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    button.isEnabled = true; checking.visibility = View.INVISIBLE
+                    when (result) {
+                        ServerCheck.Result.OK -> {
+                            prefs.edit().putString(KEY_SERVER, url).apply()
+                            startActivity(Intent(this, MainActivity::class.java)); finish()
+                        }
+                        ServerCheck.Result.TLS_FAILED -> layout.error = getString(R.string.err_tls)
+                        ServerCheck.Result.UNREACHABLE -> layout.error = getString(R.string.err_unreachable)
+                    }
+                }
             }
         }
+        button.setOnClickListener { connect() }
+        input.setOnEditorActionListener { _, id, _ ->
+            if (id == EditorInfo.IME_ACTION_GO) { connect(); true } else false
+        }
+    }
+
+    override fun onDestroy() { worker.shutdownNow(); super.onDestroy() }
+
+    companion object {
+        const val PREFS = "kagaz"
+        const val KEY_SERVER = "server"
+        const val EXTRA_CHANGE = "change"
     }
 }

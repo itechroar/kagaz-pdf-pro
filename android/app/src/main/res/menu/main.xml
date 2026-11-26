@@ -1,0 +1,5 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/action_reload" android:title="@string/reload" />
+    <item android:id="@+id/action_browser" android:title="@string/open_browser" />
+    <item android:id="@+id/action_change" android:title="@string/change_server" />
+</menu>

@@ -28,4 +28,15 @@ object ServerUrl {
         return p[0] == 10 || p[0] == 127 || (p[0] == 192 && p[1] == 168) ||
             (p[0] == 172 && p[1] in 16..31) || (p[0] == 169 && p[1] == 254)
     }
+
+    /** True when [url] has the same scheme, host and port as [server]; prefix matching would accept pdf.example.com.evil.com. */
+    fun sameOrigin(server: String, url: String): Boolean =
+        try {
+            val a = URI(server); val b = URI(url)
+            a.scheme.equals(b.scheme, true) && a.host.equals(b.host, true) && port(a) == port(b)
+        } catch (e: Exception) {
+            false
+        }
+
+    private fun port(u: URI): Int = if (u.port != -1) u.port else if (u.scheme.equals("https", true)) 443 else 80
 }

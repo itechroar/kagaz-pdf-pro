@@ -7,8 +7,10 @@
         android:icon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.Kagaz">
-        <activity android:name=".SetupActivity" android:exported="true">
+        <activity android:name=".SetupActivity" android:exported="true" android:theme="@style/Theme.Kagaz.Starting" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

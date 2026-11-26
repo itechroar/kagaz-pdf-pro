@@ -1,1 +1,6 @@
-<resources><color name="ic_bg">#1D4ED8</color></resources>
+<resources>
+    <color name="brand">#1D4ED8</color>
+    <color name="on_brand">#FFFFFF</color>
+    <color name="icon_bg">#1D4ED8</color>
+    <color name="error_red">#B3261E</color>
+</resources>
