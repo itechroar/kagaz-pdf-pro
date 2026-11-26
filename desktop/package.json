@@ -16,12 +16,38 @@
   "build": {
     "appId": "org.kagazpdf.desktop",
     "productName": "Kagaz PDF",
-    "files": ["src/**/*", "package.json"],
-    "extraResources": [
-      { "from": "resources/", "to": "server/", "filter": ["kagaz-pdf.jar", "jre/**/*"] }
+    "files": [
+      "src/**/*",
+      "package.json"
     ],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": ["AppImage", "deb"] }
+    "extraResources": [
+      {
+        "from": "resources/",
+        "to": "server/",
+        "filter": [
+          "kagaz-pdf.jar",
+          "jre/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "maintainer": "Kagaz Software Inc PDF <noreply@users.noreply.github.com>"
+    }
+  },
+  "homepage": "https://github.com/itechroar/kagaz-pdf-pro",
+  "author": {
+    "name": "Kagaz Software Inc PDF",
+    "email": "noreply@users.noreply.github.com"
   }
 }
