@@ -70,6 +70,8 @@ jobs:
         run: |
           if [ -n "$KAGAZ_KEYSTORE_B64" ]; then export KAGAZ_KEYSTORE_FILE="$RUNNER_TEMP/kagaz.jks"; fi
           gradle -p android :app:assembleRelease
+          cp android/app/build/outputs/apk/release/app-release*.apk android/app/build/outputs/apk/release/KagazPDF-android.apk
+          rm -f android/app/build/outputs/apk/release/app-release*.apk
       - uses: actions/upload-artifact@v4
         with:
           name: android-release-apk

@@ -43,7 +43,8 @@
       ],
       "category": "Office",
       "maintainer": "Kagaz Software Inc PDF <noreply@users.noreply.github.com>"
-    }
+    },
+    "artifactName": "KagazPDF-${version}-${os}-${arch}.${ext}"
   },
   "homepage": "https://github.com/itechroar/kagaz-pdf-pro",
   "author": {
