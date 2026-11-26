@@ -1,0 +1,164 @@
+package kagaz.software.SPDF.controller.api.converters;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.Set;
+
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
+
+import io.swagger.v3.oas.annotations.Operation;
+
+import lombok.RequiredArgsConstructor;
+
+import kagaz.software.SPDF.config.EndpointConfiguration;
+import kagaz.software.SPDF.model.api.converters.PdfToPresentationRequest;
+import kagaz.software.SPDF.model.api.converters.PdfToTextOrRTFRequest;
+import kagaz.software.SPDF.model.api.converters.PdfToWordRequest;
+import kagaz.software.SPDF.service.OfficeConversionService;
+import kagaz.software.common.annotations.AutoJobPostMapping;
+import kagaz.software.common.annotations.api.ConvertApi;
+import kagaz.software.common.enumeration.ResourceWeight;
+import kagaz.software.common.model.api.PDFFile;
+import kagaz.software.common.model.tool.ToolArity;
+import kagaz.software.common.model.tool.ToolFormat;
+import kagaz.software.common.model.tool.ToolIO;
+import kagaz.software.common.model.tool.ToolIOCase;
+import kagaz.software.common.model.tool.ToolIOWhen;
+import kagaz.software.common.service.CustomPDFDocumentFactory;
+import kagaz.software.common.util.ExceptionUtils;
+import kagaz.software.common.util.GeneralUtils;
+import kagaz.software.common.util.TempFile;
+import kagaz.software.common.util.TempFileManager;
+import kagaz.software.common.util.WebResponseUtils;
+
+@ConvertApi
+@RequiredArgsConstructor
+public class ConvertPDFToOffice {
+
+    private final CustomPDFDocumentFactory pdfDocumentFactory;
+    private final TempFileManager tempFileManager;
+    private final OfficeConversionService officeConversionService;
+    private final EndpointConfiguration endpointConfiguration;
+
+    @AutoJobPostMapping(
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            value = "/pdf/presentation",
+            resourceWeight = ResourceWeight.LARGE_WEIGHT)
+    @ToolIO(produces = ToolFormat.PPT)
+    @Operation(
+            summary = "Convert PDF to Presentation format",
+            description = "This endpoint converts a given PDF file to a Presentation format.")
+    public ResponseEntity<Resource> processPdfToPresentation(
+            @ModelAttribute PdfToPresentationRequest request) throws IOException {
+        MultipartFile inputFile = request.getFileInput();
+        String outputFormat = request.getOutputFormat();
+        return convert(
+                inputFile,
+                outputFormat,
+                Set.of("ppt", "pptx", "odp"),
+                MediaType.APPLICATION_OCTET_STREAM);
+    }
+
+    @AutoJobPostMapping(
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            value = "/pdf/text",
+            resourceWeight = ResourceWeight.MEDIUM_WEIGHT)
+    @ToolIO(
+            produces = ToolFormat.TEXT,
+            cases =
+                    @ToolIOCase(
+                            when = @ToolIOWhen(param = "outputFormat", matches = "rtf"),
+                            produces = ToolFormat.WORD,
+                            arity = ToolArity.SISO))
+    @Operation(
+            summary = "Convert PDF to Text or RTF format",
+            description = "This endpoint converts a given PDF file to Text or RTF format.")
+    public ResponseEntity<Resource> processPdfToRTForTXT(
+            @ModelAttribute PdfToTextOrRTFRequest request) throws IOException {
+        MultipartFile inputFile = request.getFileInput();
+        String outputFormat = request.getOutputFormat();
+        boolean plainText = "txt".equals(outputFormat);
+        // The interceptor only sees pdf-to-text; RTF has its own key, which removal must honour.
+        // Other formats are left to the 400 below.
+        if ("rtf".equals(outputFormat) && !endpointConfiguration.isEndpointEnabled("pdf-to-rtf")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This endpoint is disabled");
+        }
+        if (plainText) {
+            String fileName =
+                    GeneralUtils.generateFilename(inputFile.getOriginalFilename(), ".txt");
+            TempFile finalOut = tempFileManager.createManagedTempFile(".txt");
+            try (PDDocument document = pdfDocumentFactory.load(inputFile)) {
+                PDFTextStripper stripper = new PDFTextStripper();
+                Files.writeString(finalOut.getPath(), stripper.getText(document), UTF_8);
+            } catch (Exception e) {
+                finalOut.close();
+                throw e;
+            }
+            return WebResponseUtils.fileToWebResponse(finalOut, fileName, MediaType.TEXT_PLAIN);
+        }
+        return convert(inputFile, outputFormat, Set.of("rtf"), MediaType.APPLICATION_OCTET_STREAM);
+    }
+
+    @AutoJobPostMapping(
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            value = "/pdf/word",
+            resourceWeight = ResourceWeight.LARGE_WEIGHT)
+    @ToolIO(produces = ToolFormat.WORD)
+    @Operation(
+            summary = "Convert PDF to Word document",
+            description = "This endpoint converts a given PDF file to a Word document format.")
+    public ResponseEntity<Resource> processPdfToWord(@ModelAttribute PdfToWordRequest request)
+            throws IOException {
+        MultipartFile inputFile = request.getFileInput();
+        String outputFormat = request.getOutputFormat();
+        if ("doc".equalsIgnoreCase(outputFormat)) {
+            throw ExceptionUtils.createIllegalArgumentException(
+                    "error.docOutputUnsupported",
+                    "PDF to .doc is no longer supported; use docx or odt");
+        }
+        return convert(
+                inputFile, outputFormat, Set.of("docx", "odt"), MediaType.APPLICATION_OCTET_STREAM);
+    }
+
+    @AutoJobPostMapping(
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            value = "/pdf/xml",
+            resourceWeight = ResourceWeight.LARGE_WEIGHT)
+    @ToolIO(produces = ToolFormat.XML)
+    @Operation(
+            summary = "Convert PDF to XML",
+            description = "This endpoint converts a PDF file to an XML file.")
+    public ResponseEntity<Resource> processPdfToXML(@ModelAttribute PDFFile file) throws Exception {
+        MultipartFile inputFile = file.getFileInput();
+        return convert(inputFile, "xml", Set.of("xml"), MediaType.APPLICATION_XML);
+    }
+
+    private ResponseEntity<Resource> convert(
+            MultipartFile input, String format, Set<String> formats, MediaType type)
+            throws IOException {
+        boolean pdf = MediaType.APPLICATION_PDF_VALUE.equals(input.getContentType());
+        if (format == null || !formats.contains(format) || !pdf) {
+            return ResponseEntity.badRequest().build();
+        }
+        TempFile out = tempFileManager.createManagedTempFile("." + format);
+        try (PDDocument document = pdfDocumentFactory.load(input)) {
+            officeConversionService.convert(
+                    document, out.getPath(), format, officeConversionService.settings());
+        } catch (Exception e) {
+            out.close();
+            throw e;
+        }
+        String fileName = GeneralUtils.generateFilename(input.getOriginalFilename(), "." + format);
+        return WebResponseUtils.fileToWebResponse(out, fileName, type);
+    }
+}

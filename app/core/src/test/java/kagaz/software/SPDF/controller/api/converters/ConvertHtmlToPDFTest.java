@@ -1,0 +1,182 @@
+package kagaz.software.SPDF.controller.api.converters;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyFloat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.io.File;
+import java.nio.file.Files;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockMultipartFile;
+
+import kagaz.software.common.model.api.converters.HTMLToPdfRequest;
+import kagaz.software.common.service.CustomPDFDocumentFactory;
+import kagaz.software.common.util.CustomHtmlSanitizer;
+import kagaz.software.common.util.GeneralUtils;
+import kagaz.software.common.util.TempFile;
+import kagaz.software.common.util.TempFileManager;
+import kagaz.software.common.util.WebResponseUtils;
+
+@ExtendWith(MockitoExtension.class)
+class ConvertHtmlToPDFTest {
+    private static ResponseEntity<Resource> streamingOk(byte[] bytes) {
+        return ResponseEntity.ok(new ByteArrayResource(bytes));
+    }
+
+    private static byte[] drainBody(ResponseEntity<Resource> response) throws java.io.IOException {
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.io.InputStream __in = response.getBody().getInputStream()) {
+            __in.transferTo(baos);
+        }
+        return baos.toByteArray();
+    }
+
+    @Mock private CustomPDFDocumentFactory pdfDocumentFactory;
+    @Mock private TempFileManager tempFileManager;
+    @Mock private CustomHtmlSanitizer customHtmlSanitizer;
+
+    @Mock private kagaz.software.SPDF.service.OfficeToPdfService officeToPdfService;
+
+    @InjectMocks private ConvertHtmlToPDF controller;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        lenient()
+                .when(tempFileManager.createManagedTempFile(anyString()))
+                .thenAnswer(
+                        inv -> {
+                            File f =
+                                    Files.createTempFile("test", inv.<String>getArgument(0))
+                                            .toFile();
+                            TempFile tf = mock(TempFile.class);
+                            lenient().when(tf.getFile()).thenReturn(f);
+                            lenient().when(tf.getPath()).thenReturn(f.toPath());
+                            return tf;
+                        });
+    }
+
+    @Test
+    void htmlToPdf_nullFileInputThrows() {
+        HTMLToPdfRequest request = new HTMLToPdfRequest();
+        request.setFileInput(null);
+
+        assertThrows(Exception.class, () -> controller.HtmlToPdf(request));
+    }
+
+    @Test
+    void htmlToPdf_invalidExtensionThrows() {
+        MockMultipartFile file =
+                new MockMultipartFile("fileInput", "test.txt", "text/plain", "content".getBytes());
+        HTMLToPdfRequest request = new HTMLToPdfRequest();
+        request.setFileInput(file);
+
+        assertThrows(Exception.class, () -> controller.HtmlToPdf(request));
+    }
+
+    @Test
+    void htmlToPdf_validHtmlFile() throws Exception {
+        byte[] htmlContent = "<html><body>Hello</body></html>".getBytes();
+        byte[] pdfBytes = "pdf-content".getBytes();
+        byte[] processedPdf = "processed-pdf".getBytes();
+
+        MockMultipartFile file =
+                new MockMultipartFile("fileInput", "test.html", "text/html", htmlContent);
+        HTMLToPdfRequest request = new HTMLToPdfRequest();
+        request.setFileInput(file);
+        request.setZoom(1.5f);
+        when(pdfDocumentFactory.createNewBytesBasedOnOldDocument(pdfBytes))
+                .thenReturn(processedPdf);
+
+        ResponseEntity<Resource> expectedResponse = streamingOk(processedPdf);
+
+        try (MockedStatic<GeneralUtils> guMock = Mockito.mockStatic(GeneralUtils.class);
+                MockedStatic<WebResponseUtils> wrMock =
+                        Mockito.mockStatic(WebResponseUtils.class)) {
+
+            when(officeToPdfService.convertHtml(any(byte[].class), anyBoolean(), anyFloat()))
+                    .thenReturn(pdfBytes);
+
+            guMock.when(() -> GeneralUtils.generateFilename("test.html", ".pdf"))
+                    .thenReturn("test.pdf");
+
+            wrMock.when(
+                            () ->
+                                    WebResponseUtils.pdfFileToWebResponse(
+                                            any(TempFile.class), anyString()))
+                    .thenReturn(expectedResponse);
+
+            ResponseEntity<Resource> response = controller.HtmlToPdf(request);
+
+            assertEquals(HttpStatus.OK, response.getStatusCode());
+            verify(officeToPdfService).convertHtml(any(byte[].class), eq(false), eq(1.5f));
+        }
+    }
+
+    @Test
+    void htmlToPdf_validZipFile() throws Exception {
+        byte[] zipContent = "zip-content".getBytes();
+        byte[] pdfBytes = "pdf-content".getBytes();
+        byte[] processedPdf = "processed-pdf".getBytes();
+
+        MockMultipartFile file =
+                new MockMultipartFile("fileInput", "archive.zip", "application/zip", zipContent);
+        HTMLToPdfRequest request = new HTMLToPdfRequest();
+        request.setFileInput(file);
+        when(pdfDocumentFactory.createNewBytesBasedOnOldDocument(pdfBytes))
+                .thenReturn(processedPdf);
+
+        ResponseEntity<Resource> expectedResponse = streamingOk(processedPdf);
+
+        try (MockedStatic<GeneralUtils> guMock = Mockito.mockStatic(GeneralUtils.class);
+                MockedStatic<WebResponseUtils> wrMock =
+                        Mockito.mockStatic(WebResponseUtils.class)) {
+
+            when(officeToPdfService.convertHtml(any(byte[].class), anyBoolean(), anyFloat()))
+                    .thenReturn(pdfBytes);
+
+            guMock.when(() -> GeneralUtils.generateFilename("archive.zip", ".pdf"))
+                    .thenReturn("archive.pdf");
+
+            wrMock.when(
+                            () ->
+                                    WebResponseUtils.pdfFileToWebResponse(
+                                            any(TempFile.class), anyString()))
+                    .thenReturn(expectedResponse);
+
+            ResponseEntity<Resource> response = controller.HtmlToPdf(request);
+
+            assertEquals(HttpStatus.OK, response.getStatusCode());
+            verify(officeToPdfService).convertHtml(any(byte[].class), eq(true), eq(1f));
+        }
+    }
+
+    @Test
+    void htmlToPdf_nullFilenameThrows() {
+        MockMultipartFile file =
+                new MockMultipartFile("fileInput", null, "text/html", "content".getBytes());
+        HTMLToPdfRequest request = new HTMLToPdfRequest();
+        request.setFileInput(file);
+
+        assertThrows(Exception.class, () -> controller.HtmlToPdf(request));
+    }
+}

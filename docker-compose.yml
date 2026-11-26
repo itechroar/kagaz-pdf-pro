@@ -1,0 +1,38 @@
+# Run:  docker compose up -d      Open: http://localhost:8080
+# Works online, and fully offline once images are pulled (use KAGAZ_OFFLINE=true with ollama below).
+services:
+  kagaz-pdf:
+    # Build once with ./scripts/build-docker.sh (or push the image to a registry and name it here).
+    image: kagaz-pdf:local
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SECURITY_ENABLELOGIN: ${SECURITY_ENABLELOGIN:-true}
+    volumes:
+      - kagaz-data:/configs
+      - kagaz-logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/login.html >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  # Optional local model for offline use:  docker compose --profile local-ai up -d
+  # then set KAGAZ_AI_PROVIDER=ollama KAGAZ_AI_BASE_URL=http://ollama:11434 KAGAZ_AI_MODEL=llama3.2
+  # and run once:  docker compose exec ollama ollama pull llama3.2
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-ai"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  kagaz-data:
+  kagaz-logs:
+  ollama:

@@ -1,0 +1,47 @@
+Kagaz PDF Pro
+=============
+
+Kagaz PDF Pro, copyright (c) 2026 Kagaz Software Inc PDF, is licensed under the
+Apache License 2.0 (see LICENSE).
+
+It incorporates MIT-licensed code from an upstream open-source project
+(copyright (c) 2025 Stirling PDF Inc.). That project's copyright and permission
+notice is reproduced in THIRD_PARTY_LICENSE_MIT.txt, as the MIT License
+requires, and continues to apply to those portions.
+
+Scope of this fork
+------------------
+Only the MIT-licensed part of the upstream repository is included:
+everything outside the directories listed below.
+
+The following upstream directories are NOT MIT-licensed. They are governed by the
+a separate proprietary license, which forbids copying, redistribution and
+sublicensing, and requires a paid license for production use. They are therefore
+deliberately excluded from this repository and must not be added to it:
+
+  app/proprietary/
+  app/saas/
+  engine/
+  frontend/src/processor/
+  frontend/src/editor/proprietary/
+  frontend/src/editor/desktop/
+  frontend/src/editor/saas/
+  frontend/src/editor/cloud/
+
+Changes from upstream
+---------------------
+- Renamed and rebranded to "Kagaz PDF".
+- Built permanently in upstream's "core" flavor (no :proprietary / :saas modules).
+- Removed the upstream PostHog project key and the Scarf tracking pixel;
+  analytics are disabled by default.
+- Removed upstream release/CI infrastructure and the desktop (Tauri) shell,
+  whose sources are part of the excluded proprietary directories.
+- Added original implementations (Apache-2.0) of login/users, audit log,
+  OpenID Connect SSO (app/auth) and an Electron desktop shell (desktop/).
+  These were written without copying or consulting the proprietary sources.
+
+Internal Java package names and some environment variable prefixes are
+inherited from upstream and kept for compatibility.
+
+Third-party components keep their own licenses; see
+frontend/src/assets/3rdPartyLicenses.json and the Gradle dependency tree.

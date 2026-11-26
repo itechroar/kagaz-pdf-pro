@@ -1,0 +1,356 @@
+package kagaz.software.common.annotations;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
+
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.MDC;
+import org.springframework.http.ResponseEntity;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.multipart.MultipartFile;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+import kagaz.software.common.aop.AutoJobAspect;
+import kagaz.software.common.model.api.PDFFile;
+import kagaz.software.common.service.FileStorage;
+import kagaz.software.common.service.JobExecutorService;
+import kagaz.software.common.service.JobOwnershipService;
+
+@ExtendWith(MockitoExtension.class)
+class AutoJobPostMappingIntegrationTest {
+
+    private AutoJobAspect autoJobAspect;
+
+    @Mock private JobExecutorService jobExecutorService;
+
+    @Mock private HttpServletRequest request;
+
+    @Mock private FileStorage fileStorage;
+
+    @BeforeEach
+    void setUp() {
+        autoJobAspect = new AutoJobAspect(jobExecutorService, request, fileStorage);
+    }
+
+    @Mock private ProceedingJoinPoint joinPoint;
+
+    @Mock private AutoJobPostMapping autoJobPostMapping;
+
+    @Captor private ArgumentCaptor<Supplier<Object>> workCaptor;
+
+    @Captor private ArgumentCaptor<Boolean> asyncCaptor;
+
+    @Captor private ArgumentCaptor<Long> timeoutCaptor;
+
+    @Captor private ArgumentCaptor<Boolean> queueableCaptor;
+
+    @Captor private ArgumentCaptor<Integer> resourceWeightCaptor;
+
+    @Test
+    void shouldExecuteWithCustomParameters() throws Throwable {
+        // Given
+        PDFFile pdfFile = new PDFFile();
+        pdfFile.setFileId("test-file-id");
+        Object[] args = {pdfFile};
+
+        when(joinPoint.getArgs()).thenReturn(args);
+        when(request.getParameter("async")).thenReturn("true");
+        when(autoJobPostMapping.timeout()).thenReturn(60000L);
+        when(autoJobPostMapping.retryCount()).thenReturn(3);
+        when(autoJobPostMapping.trackProgress()).thenReturn(true);
+        when(autoJobPostMapping.queueable()).thenReturn(true);
+        when(autoJobPostMapping.resourceWeight()).thenReturn(75);
+
+        MultipartFile mockFile = mock(MultipartFile.class);
+        MultipartFile copy = mock(MultipartFile.class);
+        when(fileStorage.retrieveFile("test-file-id")).thenReturn(mockFile);
+        when(fileStorage.storeFile(mockFile)).thenReturn("copy-id");
+        when(fileStorage.retrieveFile("copy-id")).thenReturn(copy);
+
+        when(jobExecutorService.runJobGeneric(
+                        anyBoolean(), any(Supplier.class), anyLong(), anyBoolean(), anyInt()))
+                .thenReturn(ResponseEntity.ok("success"));
+
+        // When
+        Object result = autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping);
+
+        // Then
+        assertEquals(ResponseEntity.ok("success"), result);
+
+        verify(jobExecutorService)
+                .runJobGeneric(
+                        asyncCaptor.capture(),
+                        workCaptor.capture(),
+                        timeoutCaptor.capture(),
+                        queueableCaptor.capture(),
+                        resourceWeightCaptor.capture());
+
+        assertTrue(asyncCaptor.getValue(), "Async should be true");
+        assertEquals(60000L, timeoutCaptor.getValue(), "Timeout should be 60000ms");
+        assertTrue(queueableCaptor.getValue(), "Queueable should be true");
+        assertEquals(75, resourceWeightCaptor.getValue(), "Resource weight should be 75");
+
+        // The queued job reads its own copy, which is cleaned up with the job
+        assertSame(copy, pdfFile.getFileInput());
+        verify(request)
+                .setAttribute(
+                        eq(JobExecutorService.PENDING_INPUT_FILE_IDS_ATTR), eq(List.of("copy-id")));
+    }
+
+    @Test
+    void syncFileIdInputReadsStoredFileWithoutCopy() throws Throwable {
+        PDFFile pdfFile = new PDFFile();
+        pdfFile.setFileId("test-file-id");
+        when(joinPoint.getArgs()).thenReturn(new Object[] {pdfFile});
+        when(request.getParameter("async")).thenReturn("false");
+        when(autoJobPostMapping.retryCount()).thenReturn(1);
+        MultipartFile stored = mock(MultipartFile.class);
+        when(fileStorage.retrieveFile("test-file-id")).thenReturn(stored);
+        when(jobExecutorService.runJobGeneric(
+                        anyBoolean(), any(Supplier.class), anyLong(), anyBoolean(), anyInt()))
+                .thenReturn(ResponseEntity.ok("success"));
+
+        autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping);
+
+        assertSame(stored, pdfFile.getFileInput());
+        verify(fileStorage, never()).storeFile(any(MultipartFile.class));
+    }
+
+    @Test
+    void failedCopyRetrievalDeletesOnlyTheNewCopy() throws Exception {
+        PDFFile input = new PDFFile();
+        input.setFileId("source-id");
+        MultipartFile source = mock(MultipartFile.class);
+        IOException failure = new IOException("copy retrieval failed");
+        when(joinPoint.getArgs()).thenReturn(new Object[] {input});
+        when(request.getParameter("async")).thenReturn("true");
+        when(fileStorage.retrieveFile("source-id")).thenReturn(source);
+        when(fileStorage.storeFile(source)).thenReturn("copy-id");
+        when(fileStorage.retrieveFile("copy-id")).thenThrow(failure);
+        when(fileStorage.deleteFileAsSystem("copy-id")).thenReturn(true);
+
+        RuntimeException result =
+                assertThrows(
+                        RuntimeException.class,
+                        () -> autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping));
+
+        assertSame(failure, result.getCause());
+        verify(fileStorage).deleteFileAsSystem("copy-id");
+        verify(fileStorage, never()).deleteFileAsSystem("source-id");
+        verifyNoInteractions(jobExecutorService);
+    }
+
+    @Test
+    void cleanupFailureDoesNotHideTheRetrievalFailure() throws Exception {
+        PDFFile input = new PDFFile();
+        input.setFileId("source-id");
+        MultipartFile source = mock(MultipartFile.class);
+        IOException failure = new IOException("copy retrieval failed");
+        when(joinPoint.getArgs()).thenReturn(new Object[] {input});
+        when(request.getParameter("async")).thenReturn("true");
+        when(fileStorage.retrieveFile("source-id")).thenReturn(source);
+        when(fileStorage.storeFile(source)).thenReturn("copy-id");
+        when(fileStorage.retrieveFile("copy-id")).thenThrow(failure);
+        when(fileStorage.deleteFileAsSystem("copy-id"))
+                .thenThrow(new IllegalStateException("cleanup failed"));
+
+        RuntimeException result =
+                assertThrows(
+                        RuntimeException.class,
+                        () -> autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping));
+
+        assertSame(failure, result.getCause());
+        verify(fileStorage).deleteFileAsSystem("copy-id");
+        verifyNoInteractions(jobExecutorService);
+    }
+
+    @Test
+    void failedUploadCopyRetrievalDeletesTheCopy() throws Exception {
+        PDFFile input = new PDFFile();
+        MultipartFile upload = mock(MultipartFile.class);
+        input.setFileInput(upload);
+        IOException failure = new IOException("upload copy retrieval failed");
+        when(joinPoint.getArgs()).thenReturn(new Object[] {input});
+        when(request.getParameter("async")).thenReturn("true");
+        when(fileStorage.storeFile(upload)).thenReturn("upload-copy");
+        when(fileStorage.retrieveFile("upload-copy")).thenThrow(failure);
+        when(fileStorage.deleteFileAsSystem("upload-copy")).thenReturn(true);
+
+        RuntimeException result =
+                assertThrows(
+                        RuntimeException.class,
+                        () -> autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping));
+
+        assertSame(failure, result.getCause());
+        verify(fileStorage).deleteFileAsSystem("upload-copy");
+        verifyNoInteractions(jobExecutorService);
+    }
+
+    @Test
+    void laterInputFailureRollsBackAllCopiesMadeForTheRequest() throws Exception {
+        PDFFile first = new PDFFile();
+        PDFFile second = new PDFFile();
+        first.setFileId("source-one");
+        second.setFileId("source-two");
+        MultipartFile sourceOne = mock(MultipartFile.class);
+        MultipartFile sourceTwo = mock(MultipartFile.class);
+        when(joinPoint.getArgs()).thenReturn(new Object[] {first, second});
+        when(request.getParameter("async")).thenReturn("true");
+        when(fileStorage.retrieveFile("source-one")).thenReturn(sourceOne);
+        when(fileStorage.retrieveFile("source-two")).thenReturn(sourceTwo);
+        when(fileStorage.storeFile(sourceOne)).thenReturn("copy-one");
+        when(fileStorage.storeFile(sourceTwo)).thenReturn("copy-two");
+        when(fileStorage.retrieveFile("copy-one")).thenReturn(mock(MultipartFile.class));
+        when(fileStorage.retrieveFile("copy-two"))
+                .thenThrow(new IOException("second input failed"));
+        when(fileStorage.deleteFileAsSystem("copy-one")).thenReturn(true);
+        when(fileStorage.deleteFileAsSystem("copy-two")).thenReturn(true);
+
+        assertThrows(
+                RuntimeException.class,
+                () -> autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping));
+
+        verify(fileStorage).deleteFileAsSystem("copy-one");
+        verify(fileStorage).deleteFileAsSystem("copy-two");
+        verify(fileStorage, never()).deleteFileAsSystem("source-one");
+        verify(fileStorage, never()).deleteFileAsSystem("source-two");
+        verifyNoInteractions(jobExecutorService);
+    }
+
+    @Test
+    void sourceRetrievalFailureDoesNotDeleteTheSource() throws Exception {
+        PDFFile input = new PDFFile();
+        input.setFileId("source-id");
+        when(joinPoint.getArgs()).thenReturn(new Object[] {input});
+        when(request.getParameter("async")).thenReturn("true");
+        when(fileStorage.retrieveFile("source-id"))
+                .thenThrow(new IOException("source unavailable"));
+
+        assertThrows(
+                RuntimeException.class,
+                () -> autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping));
+
+        verify(fileStorage, never()).deleteFileAsSystem(anyString());
+        verifyNoInteractions(jobExecutorService);
+    }
+
+    @Test
+    void shouldRetryOnError() throws Throwable {
+        // Given
+        when(joinPoint.getArgs()).thenReturn(new Object[0]);
+        when(request.getParameter("async")).thenReturn("false");
+        when(autoJobPostMapping.timeout()).thenReturn(-1L);
+        when(autoJobPostMapping.retryCount()).thenReturn(2);
+        when(autoJobPostMapping.trackProgress()).thenReturn(false);
+        when(autoJobPostMapping.queueable()).thenReturn(false);
+        when(autoJobPostMapping.resourceWeight()).thenReturn(50);
+
+        // First call throws exception, second succeeds
+        when(joinPoint.proceed(any()))
+                .thenThrow(new RuntimeException("First attempt failed"))
+                .thenReturn(ResponseEntity.ok("retry succeeded"));
+
+        // Mock jobExecutorService to execute the work immediately
+        when(jobExecutorService.runJobGeneric(
+                        anyBoolean(), any(Supplier.class), anyLong(), anyBoolean(), anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            Supplier<Object> work = invocation.getArgument(1);
+                            return work.get();
+                        });
+
+        // When
+        Object result = autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping);
+
+        // Then
+        assertEquals(ResponseEntity.ok("retry succeeded"), result);
+
+        // Verify that proceed was called twice (initial attempt + 1 retry)
+        verify(joinPoint, times(2)).proceed(any());
+    }
+
+    @Test
+    void shouldHandlePDFFileWithAsyncRequests() throws Throwable {
+        // Given
+        PDFFile pdfFile = new PDFFile();
+        pdfFile.setFileInput(mock(MultipartFile.class));
+        Object[] args = {pdfFile};
+
+        when(joinPoint.getArgs()).thenReturn(args);
+        when(request.getParameter("async")).thenReturn("true");
+        when(autoJobPostMapping.retryCount()).thenReturn(1);
+
+        when(fileStorage.storeFile(any(MultipartFile.class))).thenReturn("stored-file-id");
+        when(fileStorage.retrieveFile("stored-file-id")).thenReturn(mock(MultipartFile.class));
+
+        // Mock job executor to return a successful response
+        when(jobExecutorService.runJobGeneric(
+                        anyBoolean(), any(Supplier.class), anyLong(), anyBoolean(), anyInt()))
+                .thenReturn(ResponseEntity.ok("success"));
+
+        // When
+        autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping);
+
+        // Then
+        assertEquals(
+                "stored-file-id",
+                pdfFile.getFileId(),
+                "FileId should be set to the stored file id");
+        assertNotNull(pdfFile.getFileInput(), "FileInput should be replaced with persistent file");
+
+        // Verify storage operations
+        verify(fileStorage).storeFile(any(MultipartFile.class));
+        verify(fileStorage).retrieveFile("stored-file-id");
+    }
+
+    @Test
+    void shouldCarryCallerToWorkerThreadWhenAuditAspectDidNotStampMdc() throws Throwable {
+        MDC.clear();
+        JobOwnershipService jobOwnershipService = mock(JobOwnershipService.class);
+        when(jobOwnershipService.getCurrentUserId()).thenReturn(Optional.of("alice"));
+        ReflectionTestUtils.setField(autoJobAspect, "jobOwnershipService", jobOwnershipService);
+
+        when(joinPoint.getArgs()).thenReturn(new Object[0]);
+        when(request.getParameter("async")).thenReturn("false");
+        when(autoJobPostMapping.retryCount()).thenReturn(1);
+        when(joinPoint.proceed(any())).thenAnswer(invocation -> MDC.get("auditPrincipal"));
+
+        when(jobExecutorService.runJobGeneric(
+                        anyBoolean(), any(Supplier.class), anyLong(), anyBoolean(), anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            Supplier<Object> work = invocation.getArgument(1);
+                            return ResponseEntity.ok(CompletableFuture.supplyAsync(work).get());
+                        });
+
+        Object result = autoJobAspect.wrapWithJobExecution(joinPoint, autoJobPostMapping);
+
+        assertEquals(ResponseEntity.ok("alice"), result);
+        assertNull(MDC.get("auditPrincipal"), "Request thread MDC should be left untouched");
+    }
+}

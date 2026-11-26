@@ -1,0 +1,894 @@
+#!/bin/bash
+# This script initializes Kagaz PDF without OCR features.
+set -euo pipefail
+
+log() {
+  if [ $# -eq 0 ]; then
+    cat >&2
+  else
+    printf '%s\n' "$*" >&2
+  fi
+}
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+if [ -d /scripts ] && [[ ":${PATH}:" != *":/scripts:"* ]]; then
+  export PATH="/scripts:${PATH}"
+fi
+
+# === Shared environment setup ===
+# Lives here so images that call init-without-ocr.sh directly (e.g. ultra-lite)
+# get the same environment as images that go through init.sh first.
+
+_append_env_path() {
+  local target="$1" current="$2"
+  if [ -d "$target" ] && [[ ":${current}:" != *":${target}:"* ]]; then
+    [ -n "$current" ] && printf '%s' "${target}:${current}" || printf '%s' "${target}"
+  else
+    printf '%s' "$current"
+  fi
+}
+
+_python_site_dir() {
+  local venv_dir="$1" python_bin="$1/bin/python" py_tag
+  if [ -x "$python_bin" ]; then
+    if py_tag="$("$python_bin" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)" \
+       && [ -n "$py_tag" ] && [ -d "$venv_dir/lib/$py_tag/site-packages" ]; then
+      printf '%s' "$venv_dir/lib/$py_tag/site-packages"
+    fi
+  fi
+}
+
+# LD_LIBRARY_PATH: arch-specific system libs
+case "$(uname -m)" in
+  x86_64)  [ -d /usr/lib/x86_64-linux-gnu ] && export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+  aarch64) [ -d /usr/lib/aarch64-linux-gnu ] && export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+
+export MALLOC_ARENA_MAX=2              # Limit glibc arena fragmentation (saves 20-80 MB RSS)
+export DBUS_SESSION_BUS_ADDRESS=/dev/null  # Avoid D-Bus overhead
+
+# Python venv PATH + PYTHONPATH
+for _venv_bin in /opt/venv/bin; do
+  PATH="$(_append_env_path "$_venv_bin" "$PATH")"
+done
+export PATH
+unset _venv_bin
+
+_py_entries=()
+for _venv in /opt/venv; do
+  [ -d "$_venv" ] || continue
+  _site="$(_python_site_dir "$_venv")"
+  [ -n "${_site:-}" ] && _py_entries+=("$_site")
+done
+if [ ${#_py_entries[@]} -gt 0 ]; then
+  PYTHONPATH="$(IFS=:; printf '%s' "${_py_entries[*]}")${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH
+fi
+unset _venv _site _py_entries
+
+if [ -x /scripts/kagaz-diagnostics.sh ]; then
+  mkdir -p /usr/local/bin
+  ln -sf /scripts/kagaz-diagnostics.sh /usr/local/bin/diagnostics
+  ln -sf /scripts/kagaz-diagnostics.sh /usr/local/bin/kagaz-diagnostics
+  ln -sf /scripts/kagaz-diagnostics.sh /usr/local/bin/diag
+  ln -sf /scripts/kagaz-diagnostics.sh /usr/local/bin/debug
+  ln -sf /scripts/kagaz-diagnostics.sh /usr/local/bin/diagnostic
+fi
+if [ -x /scripts/aot-diagnostics.sh ] && [ "${KAGAZ_AOT_ENABLE:-false}" = "true" ]; then
+  mkdir -p /usr/local/bin
+  ln -sf /scripts/aot-diagnostics.sh /usr/local/bin/aot-diag
+  ln -sf /scripts/aot-diagnostics.sh /usr/local/bin/aot-diagnostics
+fi
+
+print_versions() {
+  set +o pipefail
+  log "--- Binary Versions ---"
+  command_exists java && java -version 2>&1 | head -n 1 | log
+  command_exists qpdf && qpdf --version | head -n 1 | log
+  # Use python to get versions of pip-installed tools to be sure
+  command_exists ocrmypdf && ocrmypdf --version 2>&1 | head -n 1 | printf "ocrmypdf %s\n" "$(cat)" | log
+  command_exists tesseract && tesseract --version | head -n 1 | log
+  command_exists gs && gs --version | printf "Ghostscript %s\n" "$(cat)" | log
+  # ffmpeg disabled due to raised CVEs
+  # command_exists ffmpeg && ffmpeg -version | head -n 1 | log
+  command_exists pdfinfo && pdfinfo -v 2>&1 | head -n 1 | log
+  command_exists unpaper && unpaper --version 2>&1 | head -n 1 | sed 's/^/unpaper /' | log
+  command_exists ebook-convert && ebook-convert --version 2>&1 | head -n 1 | log
+  log "-----------------------"
+  set -o pipefail
+}
+
+cleanup() {
+  # Prevent re-entrance from double signals
+  trap '' SIGTERM EXIT
+
+  log "Shutdown signal received. Cleaning up..."
+
+  # Kill background AOT generation first (least important, clean up tmp files)
+  if [ -n "${AOT_GEN_PID:-}" ] && kill -0 "$AOT_GEN_PID" 2>/dev/null; then
+    kill -TERM "$AOT_GEN_PID" 2>/dev/null || true
+    wait "$AOT_GEN_PID" 2>/dev/null || true
+  fi
+
+  # Signal Java to shut down gracefully, Spring Boot handles SIGTERM cleanly
+  if [ -n "${JAVA_PID:-}" ] && kill -0 "$JAVA_PID" 2>/dev/null; then
+    kill -TERM "$JAVA_PID" 2>/dev/null || true
+    # Wait up to 30s for graceful shutdown before forcing
+    local _i=0
+    while [ "$_i" -lt 30 ] && kill -0 "$JAVA_PID" 2>/dev/null; do
+      sleep 1
+      _i=$((_i + 1))
+    done
+    if kill -0 "$JAVA_PID" 2>/dev/null; then
+      log "Java did not exit within 30s, sending SIGKILL"
+      kill -KILL "$JAVA_PID" 2>/dev/null || true
+    fi
+  fi
+
+  # Kill any remaining children (watchdog, etc.)
+  pkill -P $$ 2>/dev/null || true
+
+  log "Cleanup complete."
+}
+
+trap cleanup SIGTERM
+trap cleanup EXIT
+
+print_versions
+
+CURRENT_USER="$(id -un)"
+CURRENT_UID="$(id -u)"
+SWITCH_USER_WARNING_EMITTED=false
+
+warn_switch_user_once() {
+  if [ "$SWITCH_USER_WARNING_EMITTED" = false ]; then
+    log "WARNING: Unable to switch to user ${RUNTIME_USER:-kagazpdfuser}; running command as ${CURRENT_USER}."
+    SWITCH_USER_WARNING_EMITTED=true
+  fi
+}
+
+run_as_runtime_user() {
+  if [ "$CURRENT_USER" = "$RUNTIME_USER" ]; then
+    "$@"
+  elif [ "$CURRENT_UID" -eq 0 ] && command_exists setpriv; then
+    # Set HOME/USER/LOGNAME to match gosu behavior (setpriv does not touch env vars)
+    env HOME="$(getent passwd "$RUNTIME_USER" | cut -d: -f6)" \
+        USER="$RUNTIME_USER" \
+        LOGNAME="$RUNTIME_USER" \
+      setpriv --reuid="$RUNTIME_USER" --regid="$(id -gn "$RUNTIME_USER")" --init-groups -- "$@"
+  else
+    warn_switch_user_once
+    "$@"
+  fi
+}
+
+CONFIG_FILE=${CONFIG_FILE:-/configs/settings.yml}
+
+# ---------- VERSION_TAG ----------
+# Load VERSION_TAG from file if not provided via environment.
+if [ -z "${VERSION_TAG:-}" ] && [ -f /etc/kagaz_version ]; then
+  VERSION_TAG="$(tr -d '\r\n' < /etc/kagaz_version)"
+  export VERSION_TAG
+fi
+
+# ---------- AOT ----------
+# OFF by default. Set KAGAZ_AOT_ENABLE=true to opt in.
+AOT_ENABLED="${KAGAZ_AOT_ENABLE:-false}"
+
+# ---------- Dynamic Memory Detection ----------
+# Detects the container memory limit (in MB) from cgroups v2/v1 or /proc/meminfo.
+detect_container_memory_mb() {
+  local mem_bytes=""
+  local no_cgroup_limit=false
+  # cgroups v2
+  if [ -f /sys/fs/cgroup/memory.max ]; then
+    mem_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+    if [ "$mem_bytes" = "max" ]; then
+      mem_bytes=""
+      no_cgroup_limit=true
+    fi
+  fi
+  # cgroups v1 fallback
+  if [ -z "$mem_bytes" ] && [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+    mem_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+    # Values near max uint64 mean "unlimited"
+    # Use string-length heuristic (>=19 digits) to avoid shell integer overflow on Alpine/busybox
+    if [ "${#mem_bytes}" -ge 19 ]; then
+      mem_bytes=""
+      no_cgroup_limit=true
+    fi
+  fi
+  # No limit: use host RAM, the same total the JVM applies its percentages to.
+  if [ -z "$mem_bytes" ]; then
+    mem_bytes=$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo 2>/dev/null)
+    if [ "$no_cgroup_limit" = true ]; then
+      log "No container memory limit set; sizing from host RAM ($(( ${mem_bytes:-0} / 1048576 ))MB). Set mem_limit / -m to cap it."
+    fi
+  fi
+  if [ -n "$mem_bytes" ] && [ "$mem_bytes" -gt 0 ] 2>/dev/null; then
+    echo $(( mem_bytes / 1048576 ))
+  else
+    echo "0"
+  fi
+}
+
+# Computes dynamic JVM memory flags based on detected container memory.
+# Uses performance-oriented settings (Shenandoah GC).
+# Sets: DYNAMIC_INITIAL_RAM_PCT, DYNAMIC_MAX_RAM_PCT, DYNAMIC_MAX_METASPACE
+compute_dynamic_memory() {
+  local mem_mb=$1
+
+  if [ "$mem_mb" -le 0 ] 2>/dev/null; then
+    # Cannot detect memory; use safe defaults
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=70
+    DYNAMIC_MAX_METASPACE=512
+    return
+  fi
+
+  # NOTE: MaxRAMPercentage governs HEAP only. Total JVM footprint also includes:
+  # - Metaspace (MaxMetaspaceSize)
+  # - Code cache (~100-200MB)
+  # - Thread stacks (~1MB each × virtual threads)
+  # - Direct byte buffers, native memory
+  # Rule of thumb: heap% + (metaspace + ~200MB overhead) should fit in container.
+  if [ "$mem_mb" -le 512 ]; then
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=55
+    DYNAMIC_MAX_METASPACE=256
+  elif [ "$mem_mb" -le 1024 ]; then
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=60
+    DYNAMIC_MAX_METASPACE=384
+  elif [ "$mem_mb" -le 2048 ]; then
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=65
+    DYNAMIC_MAX_METASPACE=512
+  elif [ "$mem_mb" -le 4096 ]; then
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=70
+    DYNAMIC_MAX_METASPACE=512
+  else
+    # Large memory (>4GB): cap at 70% to leave room for off-heap (Ghostscript, etc.)
+    DYNAMIC_INITIAL_RAM_PCT=2
+    DYNAMIC_MAX_RAM_PCT=70
+    DYNAMIC_MAX_METASPACE=768
+  fi
+
+  log "Container memory ${mem_mb}MB: InitialRAM=${DYNAMIC_INITIAL_RAM_PCT}%, MaxRAM=${DYNAMIC_MAX_RAM_PCT}%, MaxMeta=${DYNAMIC_MAX_METASPACE}m"
+}
+
+# ---------- Project Leyden AOT Cache (JEP 483 + 514 + 515) ----------
+# Replaces legacy AppCDS with JDK 25's AOT cache. Uses the three-step workflow:
+#   1. RECORD , runs Spring context init, captures class loading + method profiles
+#   2. CREATE , builds the AOT cache file (does NOT start the app)
+#   3. RUNTIME, java -XX:AOTCache=... starts with pre-linked classes + compiled methods
+# Constraints:
+# - Cache must be generated on the same JDK build + OS + arch as production (satisfied
+#   because we generate inside the same container image at runtime)
+# - ZGC not supported until JDK 26 (G1GC and Shenandoah are fully supported)
+# - Signed JARs (BouncyCastle) are silently skipped, no warnings, no functionality loss
+generate_aot_cache() {
+  local aot_path="$1"
+  shift
+  # Remaining args ($@) are the classpath/main-class arguments for the training run
+
+  local aot_dir
+  aot_dir=$(dirname "$aot_path")
+  mkdir -p "$aot_dir" 2>/dev/null || true
+
+  local aot_conf="/tmp/kagaz.aotconf"
+  local arch
+  arch=$(uname -m)
+
+  # ── ARM-aware heap sizing ──
+  # ARM devices (Raspberry Pi, Ampere) often have tighter memory.
+  # Scale training heap down to avoid OOM-killing the background generation.
+  local record_xmx="512m"
+  local create_xmx="256m"
+  if [ "${CONTAINER_MEM_MB:-0}" -gt 0 ] && [ "${CONTAINER_MEM_MB}" -le 1024 ]; then
+    record_xmx="256m"
+    create_xmx="128m"
+  fi
+
+  # ── ARM-aware timeouts ──
+  # ARM under QEMU or on slow SD/eMMC can take much longer than x86_64.
+  local record_timeout=300
+  local create_timeout=180
+  if [ "$arch" = "aarch64" ]; then
+    record_timeout=600
+    create_timeout=300
+  fi
+
+  log "AOT: arch=${arch} mem=${CONTAINER_MEM_MB:-?}MB heap=${record_xmx} timeouts=${record_timeout}s/${create_timeout}s"
+  log "AOT: COMPACT_HEADERS='${COMPACT_HEADERS_FLAG:-<none>}' COMPRESSED_OOPS='${COMPRESSED_OOPS_FLAG}'"
+  log "AOT: Phase 1/2, Recording class loading + method profiles..."
+
+  # RECORD, starts Spring context, observes class loading + collects method profiles (JEP 515).
+  # Non-zero exit is expected: -Dspring.context.exit=onRefresh triggers controlled shutdown.
+  # Uses in-memory H2 to avoid file-lock conflicts with the running app.
+  # COMPACT_HEADERS_FLAG/COMPRESSED_OOPS_FLAG must exactly match the runtime invocation.
+  # Clear all JVM option env vars so external settings (e.g. _JAVA_OPTIONS=-Xms14G) cannot
+  # conflict with the explicit -Xmx we pass here. Training uses its own minimal flag set.
+  local record_exit=0
+  if command_exists timeout; then
+    JAVA_TOOL_OPTIONS= JDK_JAVA_OPTIONS= _JAVA_OPTIONS= \
+    timeout "${record_timeout}s" \
+      java "-Xmx${record_xmx}" ${COMPACT_HEADERS_FLAG:-} ${COMPRESSED_OOPS_FLAG} \
+           -Xlog:aot=error \
+           -XX:AOTMode=record \
+           -XX:AOTConfiguration="$aot_conf" \
+           -Dspring.main.banner-mode=off \
+           -Dspring.context.exit=onRefresh \
+           -Dkagaz.datasource.url="jdbc:h2:mem:aottraining;DB_CLOSE_DELAY=-1;MODE=PostgreSQL" \
+           "$@" >/tmp/aot-record.log 2>&1 || record_exit=$?
+  else
+    JAVA_TOOL_OPTIONS= JDK_JAVA_OPTIONS= _JAVA_OPTIONS= \
+    java "-Xmx${record_xmx}" ${COMPACT_HEADERS_FLAG:-} ${COMPRESSED_OOPS_FLAG} \
+         -Xlog:aot=error \
+         -XX:AOTMode=record \
+         -XX:AOTConfiguration="$aot_conf" \
+         -Dspring.main.banner-mode=off \
+         -Dspring.context.exit=onRefresh \
+         -Dkagaz.datasource.url="jdbc:h2:mem:aottraining;DB_CLOSE_DELAY=-1;MODE=PostgreSQL" \
+         "$@" >/tmp/aot-record.log 2>&1 || record_exit=$?
+  fi
+
+  if [ "$record_exit" -eq 124 ]; then
+    log "AOT: RECORD phase timed out after ${record_timeout}s, skipping"
+    rm -f "$aot_conf" /tmp/aot-record.log
+    return 1
+  fi
+  if [ "$record_exit" -eq 137 ]; then
+    log "AOT: RECORD phase OOM-killed (exit 137), container memory too low for training"
+    log "AOT: Set KAGAZ_AOT_ENABLE=false or increase container memory above 1GB"
+    rm -f "$aot_conf" /tmp/aot-record.log
+    return 1
+  fi
+
+  if [ ! -f "$aot_conf" ]; then
+    log "AOT: Training produced no configuration file (exit=${record_exit}), last 30 lines:"
+    tail -30 /tmp/aot-record.log 2>/dev/null | while IFS= read -r line; do log "  $line"; done
+    rm -f /tmp/aot-record.log
+    return 1
+  fi
+  log "AOT: Phase 1 complete, conf $(du -h "$aot_conf" 2>/dev/null | cut -f1)"
+  log "AOT: Phase 2/2, Creating AOT cache from recorded profile..."
+
+  # CREATE, does NOT start the application; builds pre-linked class + method data.
+  local create_exit=0
+  if command_exists timeout; then
+    JAVA_TOOL_OPTIONS= JDK_JAVA_OPTIONS= _JAVA_OPTIONS= \
+    timeout "${create_timeout}s" \
+      java "-Xmx${create_xmx}" ${COMPACT_HEADERS_FLAG:-} ${COMPRESSED_OOPS_FLAG} \
+           -Xlog:aot=error \
+           -XX:AOTMode=create \
+           -XX:AOTConfiguration="$aot_conf" \
+           -XX:AOTCache="$aot_path" \
+           "$@" >/tmp/aot-create.log 2>&1 || create_exit=$?
+  else
+    JAVA_TOOL_OPTIONS= JDK_JAVA_OPTIONS= _JAVA_OPTIONS= \
+    java "-Xmx${create_xmx}" ${COMPACT_HEADERS_FLAG:-} ${COMPRESSED_OOPS_FLAG} \
+         -Xlog:aot=error \
+         -XX:AOTMode=create \
+         -XX:AOTConfiguration="$aot_conf" \
+         -XX:AOTCache="$aot_path" \
+         "$@" >/tmp/aot-create.log 2>&1 || create_exit=$?
+  fi
+
+  if [ "$create_exit" -eq 124 ]; then
+    log "AOT: CREATE phase timed out after ${create_timeout}s"
+    rm -f "$aot_conf" "$aot_path" /tmp/aot-record.log /tmp/aot-create.log
+    return 1
+  fi
+  if [ "$create_exit" -eq 137 ]; then
+    log "AOT: CREATE phase OOM-killed (exit 137)"
+    rm -f "$aot_conf" "$aot_path" /tmp/aot-record.log /tmp/aot-create.log
+    return 1
+  fi
+
+  if [ "$create_exit" -eq 0 ] && [ -f "$aot_path" ] && [ -s "$aot_path" ]; then
+    local cache_size
+    cache_size=$(du -h "$aot_path" 2>/dev/null | cut -f1)
+    log "AOT: Cache created successfully: $aot_path ($cache_size)"
+    chmod 644 "$aot_path" 2>/dev/null || true
+    save_aot_fingerprint "$aot_path"
+    rm -f "$aot_conf" /tmp/aot-record.log /tmp/aot-create.log
+    return 0
+  else
+    log "AOT: Cache creation failed (exit=${create_exit}), last 30 lines:"
+    tail -30 /tmp/aot-create.log 2>/dev/null | while IFS= read -r line; do log "  $line"; done
+    rm -f "$aot_conf" "$aot_path" /tmp/aot-record.log /tmp/aot-create.log
+    return 1
+  fi
+}
+
+# ---------- AOT Cache Fingerprinting ----------
+# Detects stale caches automatically when the app JAR, JDK version, arch, or JVM flags change.
+# Stores a short hash alongside the cache file; mismatch → cache is deleted and regenerated.
+compute_aot_fingerprint() {
+  local fp=""
+  # Clear JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS so the JVM does not prepend
+  # "Picked up JAVA_TOOL_OPTIONS: ..." to stderr before the version line.
+  # Those vars are exported by the time the background subshell runs
+  # save_aot_fingerprint, but are NOT yet set when validate_aot_cache runs on
+  # the next boot -- causing head -1 to return different strings each time.
+  fp+="jdk:$(JAVA_TOOL_OPTIONS= JDK_JAVA_OPTIONS= _JAVA_OPTIONS= java -version 2>&1 | head -1);"
+  fp+="arch:$(uname -m);"
+  fp+="compact:${COMPACT_HEADERS_FLAG:-none};"
+  fp+="oops:${COMPRESSED_OOPS_FLAG:-none};"
+  # App identity: size+mtime is fast (avoids hashing 200MB JARs)
+  if [ -f /app/app.jar ]; then
+    fp+="app:$(stat -c '%s-%Y' /app/app.jar 2>/dev/null || echo unknown);"
+  elif [ -f /app.jar ]; then
+    fp+="app:$(stat -c '%s-%Y' /app.jar 2>/dev/null || echo unknown);"
+  elif [ -d /app/lib ]; then
+    fp+="app:$(ls -la /app/lib/ 2>/dev/null | md5sum 2>/dev/null | cut -c1-16 || echo unknown);"
+  fi
+  fp+="ver:${VERSION_TAG:-unknown};"
+  if command_exists md5sum; then
+    printf '%s' "$fp" | md5sum | cut -c1-16
+  elif command_exists sha256sum; then
+    printf '%s' "$fp" | sha256sum | cut -c1-16
+  else
+    printf '%s' "$fp" | cksum | cut -d' ' -f1
+  fi
+}
+
+validate_aot_cache() {
+  local cache_path="$1"
+  local fp_file="${cache_path}.fingerprint"
+
+  [ -f "$cache_path" ] || return 1
+  if [ ! -s "$cache_path" ]; then
+    log "AOT: Cache file is empty, removing."
+    rm -f "$cache_path" "$fp_file"
+    return 1
+  fi
+
+  local expected_fp stored_fp=""
+  expected_fp=$(compute_aot_fingerprint)
+  [ -f "$fp_file" ] && stored_fp=$(cat "$fp_file" 2>/dev/null || true)
+
+  if [ "$stored_fp" != "$expected_fp" ]; then
+    log "AOT: Fingerprint mismatch (stored=${stored_fp:-<none>} expected=${expected_fp})."
+    log "AOT: JAR, JDK, arch, or flags changed, removing stale cache."
+    rm -f "$cache_path" "$fp_file"
+    return 1
+  fi
+  log "AOT: Cache fingerprint valid (${expected_fp})"
+  return 0
+}
+
+save_aot_fingerprint() {
+  local cache_path="$1"
+  local fp_file="${cache_path}.fingerprint"
+  compute_aot_fingerprint > "$fp_file" 2>/dev/null || true
+  chmod 644 "$fp_file" 2>/dev/null || true
+}
+
+# ---------- Memory Detection ----------
+CONTAINER_MEM_MB=$(detect_container_memory_mb)
+compute_dynamic_memory "$CONTAINER_MEM_MB"
+MEMORY_FLAGS="-XX:InitialRAMPercentage=${DYNAMIC_INITIAL_RAM_PCT} -XX:MaxRAMPercentage=${DYNAMIC_MAX_RAM_PCT} -XX:MaxMetaspaceSize=${DYNAMIC_MAX_METASPACE}m"
+
+# ---------- Compressed Oops Detection ----------
+# Only needed for AOT cache consistency (training and runtime must agree on this flag).
+if [ "$AOT_ENABLED" = "true" ]; then
+  if [ "$CONTAINER_MEM_MB" -gt 0 ] 2>/dev/null; then
+    MAX_HEAP_MB=$((CONTAINER_MEM_MB * DYNAMIC_MAX_RAM_PCT / 100))
+    if [ "$MAX_HEAP_MB" -ge 31744 ]; then
+      COMPRESSED_OOPS_FLAG="-XX:-UseCompressedOops"
+    else
+      COMPRESSED_OOPS_FLAG="-XX:+UseCompressedOops"
+    fi
+  else
+    COMPRESSED_OOPS_FLAG="-XX:+UseCompressedOops"
+  fi
+fi
+
+# ---------- JVM Options ----------
+# Resolve JAVA_BASE_OPTS from _JVM_OPTS or user override.
+# Priority: JAVA_BASE_OPTS (explicit override) > _JVM_OPTS > fallback defaults
+# Memory percentages are computed dynamically by compute_dynamic_memory().
+
+# Calculate ConcGCThreads dynamically based on available CPUs
+# Shenandoah defaults to ParallelGCThreads/4; we cap it for large hosts
+AVAILABLE_CPUS=$(nproc 2>/dev/null || echo "2")
+if [ "$AVAILABLE_CPUS" -ge 16 ]; then
+  CONC_GC_THREADS=4
+elif [ "$AVAILABLE_CPUS" -ge 8 ]; then
+  CONC_GC_THREADS=3
+elif [ "$AVAILABLE_CPUS" -ge 4 ]; then
+  CONC_GC_THREADS=2
+else
+  CONC_GC_THREADS=1
+fi
+
+if [ -z "${JAVA_BASE_OPTS:-}" ]; then
+  if [ -n "${KAGAZ_JVM_PROFILE:-}" ]; then
+    log "KAGAZ_JVM_PROFILE is deprecated; use _JVM_OPTS or JAVA_BASE_OPTS instead"
+  fi
+  if [ -n "${_JVM_OPTS:-}" ]; then
+    STRIPPED_JVM_OPTS=$(echo "$_JVM_OPTS" | sed -E 's/-XX:ConcGCThreads=[^ ]*//g')
+    JAVA_BASE_OPTS="${STRIPPED_JVM_OPTS} -XX:ConcGCThreads=${CONC_GC_THREADS}"
+  else
+    log "JAVA_BASE_OPTS and _JVM_OPTS unset; applying fallback defaults."
+    JAVA_BASE_OPTS="-XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/kagaz-pdf/heap_dumps -XX:+UnlockExperimentalVMOptions -XX:+UseShenandoahGC -XX:ShenandoahGCMode=generational -XX:ShenandoahGCHeuristics=adaptive -XX:ShenandoahUncommitDelay=1000 -XX:ShenandoahGuaranteedYoungGCInterval=10000 -XX:ShenandoahGuaranteedOldGCInterval=30000 -XX:+UseCompactObjectHeaders -XX:+UseStringDeduplication -XX:+ExplicitGCInvokesConcurrent -XX:ConcGCThreads=${CONC_GC_THREADS} -XX:ReservedCodeCacheSize=96m -XX:CICompilerCount=2 -XX:-UseBASE64Intrinsics -Dspring.threads.virtual.enabled=true -Djava.awt.headless=true"
+  fi
+
+  # Strip any hardcoded memory/CDS/AOT flags from the options (managed dynamically)
+  JAVA_BASE_OPTS=$(echo "$JAVA_BASE_OPTS" | sed -E \
+    's/-XX:InitialRAMPercentage=[^ ]*//g;
+     s/-XX:MinRAMPercentage=[^ ]*//g;
+     s/-XX:MaxRAMPercentage=[^ ]*//g;
+     s/-XX:MaxMetaspaceSize=[^ ]*//g;
+     s/-XX:SharedArchiveFile=[^ ]*//g;
+     s/-Xshare:(auto|on|off)//g;
+     s/-XX:AOTCache=[^ ]*//g;
+     s/-XX:AOTMode=[^ ]*//g;
+     s/-XX:AOTConfiguration=[^ ]*//g')
+
+  # Append computed dynamic memory flags
+  JAVA_BASE_OPTS="${JAVA_BASE_OPTS} ${MEMORY_FLAGS}"
+else
+  # JAVA_BASE_OPTS explicitly set by user or Dockerfile
+  # Only add dynamic memory if not already present
+  if ! echo "$JAVA_BASE_OPTS" | grep -q 'MaxRAMPercentage'; then
+    JAVA_BASE_OPTS="${JAVA_BASE_OPTS} ${MEMORY_FLAGS}"
+    log "Appended dynamic memory flags to JAVA_BASE_OPTS"
+  else
+    log "JAVA_BASE_OPTS already contains memory flags; keeping user values"
+  fi
+fi
+
+# Check if Project Lilliput is supported (standard in Java 25+, but experimental on some ARM builds)
+# COMPACT_HEADERS_FLAG is used by generate_aot_cache() to ensure training/runtime consistency.
+if java -XX:+UseCompactObjectHeaders -version >/dev/null 2>&1; then
+  COMPACT_HEADERS_FLAG="-XX:+UseCompactObjectHeaders"
+  # Only append if not already present in JAVA_BASE_OPTS
+  case "${JAVA_BASE_OPTS}" in
+    *UseCompactObjectHeaders*) ;;
+    *)
+      log "JVM supports Compact Object Headers ($(uname -m)). Enabling Project Lilliput..."
+      JAVA_BASE_OPTS="${JAVA_BASE_OPTS} -XX:+UseCompactObjectHeaders"
+      ;;
+  esac
+else
+  COMPACT_HEADERS_FLAG=""
+  log "JVM does not support Compact Object Headers on $(uname -m). Skipping Project Lilliput flags."
+fi
+
+# ---------- AOT Support Check ----------
+AOT_SUPPORTED=false
+if [ "$AOT_ENABLED" = "true" ]; then
+  AOT_SUPPORTED=true
+  if ! java -XX:AOTMode=off -version >/dev/null 2>&1; then
+    log "AOT: JVM on $(uname -m) does not support -XX:AOTMode, AOT cache disabled"
+    AOT_SUPPORTED=false
+  fi
+fi
+
+# ---------- Clean deprecated/invalid JVM flags ----------
+# Remove UseCompressedClassPointers (deprecated in Java 25+ with Lilliput)
+JAVA_BASE_OPTS=$(echo "$JAVA_BASE_OPTS" | sed -E 's/-XX:[+-]UseCompressedClassPointers//g')
+# Manage UseCompressedOops explicitly only when AOT is enabled (training/runtime must agree)
+if [ "$AOT_ENABLED" = "true" ]; then
+  JAVA_BASE_OPTS=$(echo "$JAVA_BASE_OPTS" | sed -E 's/-XX:[+-]UseCompressedOops//g')
+  JAVA_BASE_OPTS="${JAVA_BASE_OPTS} ${COMPRESSED_OOPS_FLAG}"
+fi
+
+# ---------- AOT Cache Management (Project Leyden) ----------
+AOT_CACHE="/configs/cache/kagaz.aot"
+AOT_GENERATE_BACKGROUND=false
+
+if [ "$AOT_ENABLED" = "true" ]; then
+  # Strip any legacy CDS/AOT references from base opts (managed dynamically here)
+  JAVA_BASE_OPTS=$(echo "$JAVA_BASE_OPTS" | sed -E \
+    's/-XX:SharedArchiveFile=[^ ]*//g;
+     s/-Xshare:(auto|on|off)//g;
+     s/-XX:AOTCache=[^ ]*//g')
+
+  if [ "$AOT_SUPPORTED" = false ]; then
+    log "AOT: Not supported on this JVM/platform, skipping"
+  elif validate_aot_cache "$AOT_CACHE"; then
+    log "AOT cache valid: $AOT_CACHE"
+    JAVA_BASE_OPTS="${JAVA_BASE_OPTS} -XX:AOTCache=${AOT_CACHE}"
+    rm -f /app/kagaz.jsa /app/kagaz.aot /app/kagaz.aot.fingerprint 2>/dev/null || true
+  else
+    log "No valid AOT cache found. Will generate in background after app starts."
+    AOT_GENERATE_BACKGROUND=true
+  fi
+fi
+
+# Collapse duplicate whitespace
+JAVA_BASE_OPTS=$(echo "$JAVA_BASE_OPTS" | tr -s ' ')
+
+# ---------- JAVA_OPTS ----------
+# Configure Java runtime options.
+export JAVA_TOOL_OPTIONS="${JAVA_BASE_OPTS:-} ${JAVA_CUSTOM_OPTS:-}"
+# Prepend headless flag only if not already present
+case "${JAVA_TOOL_OPTIONS}" in
+  *java.awt.headless*) ;;
+  *) export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true ${JAVA_TOOL_OPTIONS}" ;;
+esac
+# The JVM echoes JAVA_TOOL_OPTIONS itself ("Picked up ..."), so only log what it cannot
+log "Running Kagaz PDF ${VERSION_TAG:-<unset>}${DISABLE_ADDITIONAL_FEATURES:+ (DISABLE_ADDITIONAL_FEATURES=${DISABLE_ADDITIONAL_FEATURES})}"
+
+# ---------- UMASK ----------
+# Set default permissions mask.
+UMASK_VAL="${UMASK:-022}"
+umask "$UMASK_VAL" 2>/dev/null || umask 022
+
+# ---------- XDG_RUNTIME_DIR ----------
+# Create the runtime directory, respecting UID/GID settings.
+RUNTIME_USER="kagazpdfuser"
+if id -u "$RUNTIME_USER" >/dev/null 2>&1; then
+  RUID="$(id -u "$RUNTIME_USER")"
+  RGRP="$(id -gn "$RUNTIME_USER")"
+else
+  RUID="$(id -u)"
+  RGRP="$(id -gn)"
+  RUNTIME_USER="$(id -un)"
+fi
+CURRENT_USER="$(id -un)"
+CURRENT_UID="$(id -u)"
+
+export XDG_RUNTIME_DIR="/tmp/xdg-${RUID}"
+mkdir -p "${XDG_RUNTIME_DIR}" || true
+if [ "$(id -u)" -eq 0 ]; then
+  chown "${RUNTIME_USER}:${RGRP}" "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+fi
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+
+# ---------- Optional ----------
+# Download security JAR in non-fat builds.
+if [[ "${FAT_DOCKER:-true}" != "true" && -x /scripts/download-security-jar.sh ]]; then
+  /scripts/download-security-jar.sh || true
+fi
+
+# ---------- UID/GID remap ----------
+# Remap user/group IDs to match container runtime settings.
+if [ "$(id -u)" -eq 0 ]; then
+  if id -u kagazpdfuser >/dev/null 2>&1; then
+    if [ -n "${PUID:-}" ] && [ "$PUID" != "$(id -u kagazpdfuser)" ]; then
+      usermod -o -u "$PUID" kagazpdfuser || true
+      chown kagazpdfuser:kagazpdfgroup "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+    fi
+  fi
+  if getent group kagazpdfgroup >/dev/null 2>&1; then
+    if [ -n "${PGID:-}" ] && [ "$PGID" != "$(getent group kagazpdfgroup | cut -d: -f3)" ]; then
+      groupmod -o -g "$PGID" kagazpdfgroup || true
+    fi
+  fi
+fi
+
+# ---------- Permissions ----------
+# Ensure required directories exist and set correct permissions.
+mkdir -p /tmp/kagaz-pdf /tmp/kagaz-pdf/heap_dumps /logs /configs /configs/heap_dumps /configs/cache /customFiles /pipeline /storage || true
+CHOWN_PATHS=("$HOME" "/logs" "/scripts" "/configs" "/customFiles" "/pipeline" "/storage" "/tmp/kagaz-pdf" "/app.jar")
+[ -d /usr/share/fonts/truetype ] && CHOWN_PATHS+=("/usr/share/fonts/truetype")
+# Chowned here rather than at build time so it follows PUID/PGID remapping.
+if [ -d "${KAGAZ_ENGINE_HOME:-/opt/kagaz-engine}" ]; then
+  mkdir -p "${KAGAZ_ENGINE_HOME:-/opt/kagaz-engine}/data" || true
+  CHOWN_PATHS+=("${KAGAZ_ENGINE_HOME:-/opt/kagaz-engine}/data")
+fi
+CHOWN_OK=true
+for p in "${CHOWN_PATHS[@]}"; do
+  if [ -e "$p" ]; then
+    chown -R "kagazpdfuser:kagazpdfgroup" "$p" 2>/dev/null || CHOWN_OK=false
+    find "$p" -type d -exec chmod 755 {} + 2>/dev/null || true
+  fi
+done
+
+# Verify write access to critical directories; repair if chown failed on bind mounts
+CRITICAL_DIRS=("/configs" "/logs" "/customFiles" "/pipeline" "/storage")
+for dir in "${CRITICAL_DIRS[@]}"; do
+  if [ -d "$dir" ]; then
+    # Test write access as the runtime user
+    if ! run_as_runtime_user test -w "$dir" 2>/dev/null; then
+      log "WARNING: ${RUNTIME_USER} cannot write to $dir - attempting to fix permissions"
+      # Try adding group-write and world-write as fallbacks
+      chmod -R o+rwX "$dir" 2>/dev/null \
+        || chmod -R a+rwX "$dir" 2>/dev/null \
+        || log "ERROR: Could not grant ${RUNTIME_USER} write access to $dir. Check your volume mount permissions (e.g. set PUID/PGID or fix host directory ownership)."
+    fi
+  fi
+done
+
+# ---------- Private work areas ----------
+# KAGAZ_TEMPDIR is user-set; a shared dir such as /tmp must keep its sticky bit and owner.
+KAGAZ_FILE_STORE="${KAGAZ_TEMPDIR:-/tmp/kagaz-files}"
+for private_dir in /tmp/kagaz-pdf "$KAGAZ_FILE_STORE"; do
+  case "$(realpath -m "$private_dir" 2>/dev/null || printf '%s' "$private_dir")" in
+    /|/tmp|/var|/var/tmp|/dev/shm|/home|/run|/usr|/etc|/opt)
+      log "Not locking down shared dir ${private_dir}"
+      continue
+      ;;
+  esac
+  mkdir -p "$private_dir" 2>/dev/null || true
+  if [ -d "$private_dir" ]; then
+    chown "kagazpdfuser:kagazpdfgroup" "$private_dir" 2>/dev/null || true
+    chmod 700 "$private_dir" 2>/dev/null || true
+  fi
+done
+
+# ---------- Java ----------
+# Start Kagaz PDF Java application.
+log "Starting Kagaz PDF"
+JAVA_CMD=(
+  java
+  -Dfile.encoding=UTF-8
+  -Djava.io.tmpdir=/tmp/kagaz-pdf
+)
+
+if [ -f "/app.jar" ]; then
+  JAVA_CMD+=("-jar" "/app.jar")
+elif [ -f "/app/app.jar" ]; then
+  # Spring Boot 4 layered JAR structure (exploded via extract --layers).
+  # Use -cp (not -jar) so the classpath matches the AOT cache exactly.
+  JAVA_CMD+=("-cp" "/app/app.jar:/app/lib/*" "kagaz.software.SPDF.SPDFApplication")
+else
+  # Legacy fallback for Spring Boot 3 layered layout
+  export JAVA_MAIN_CLASS=org.springframework.boot.loader.launch.JarLauncher
+  JAVA_CMD+=("org.springframework.boot.loader.launch.JarLauncher")
+fi
+
+# ---------- AI engine ----------
+# Only the fat image ships it. The backend already defaults to http://localhost:5001.
+KAGAZ_ENGINE_HOME="${KAGAZ_ENGINE_HOME:-/opt/kagaz-engine}"
+ENGINE_PID=""
+
+# Prints aiEngine.enabled from a settings file, parsed as real YAML by the engine's own Python.
+read_ai_engine_enabled() {
+  [ -f "$1" ] || return
+  env -u PYTHONPATH "$KAGAZ_ENGINE_HOME/.venv/bin/python" -c '
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+ai = doc.get("aiEngine") if isinstance(doc, dict) else None
+if isinstance(ai, dict) and "enabled" in ai:
+    print(str(ai["enabled"]).lower())
+' "$1" 2>/dev/null
+}
+
+# Env wins over settings.yml, as in Spring.
+ai_engine_wanted() {
+  if [ -n "${AIENGINE_ENABLED:-}" ]; then
+    [ "$(printf '%s' "$AIENGINE_ENABLED" | tr '[:upper:]' '[:lower:]')" = "true" ]
+    return
+  fi
+  local settings="${KAGAZ_BASE_PATH:+${KAGAZ_BASE_PATH%/}/configs/settings.yml}"
+  [ "$(read_ai_engine_enabled "${settings:-$CONFIG_FILE}")" = "true" ]
+}
+
+if [ -x "$KAGAZ_ENGINE_HOME/.venv/bin/python" ] && ! ai_engine_wanted; then
+  log "AI engine bundled but aiEngine.enabled is not true; not starting it (enabling it later needs a container restart)."
+elif [ -x "$KAGAZ_ENGINE_HOME/.venv/bin/python" ]; then
+  log "Starting bundled AI engine on port ${KAGAZ_ENGINE_PORT:-5001}..."
+  ENGINE_CMD=(
+    "$KAGAZ_ENGINE_HOME/.venv/bin/python" -m uvicorn
+    kagaz.api.app:app
+    --host 127.0.0.1
+    --port "${KAGAZ_ENGINE_PORT:-5001}"
+    --workers "${KAGAZ_ENGINE_WORKERS:-2}"
+    --app-dir "$KAGAZ_ENGINE_HOME/src"
+  )
+  # init.sh exports PYTHONPATH for the 3.12 tool venv; inheriting it breaks the 3.13 engine.
+  if [ "$CURRENT_USER" = "$RUNTIME_USER" ]; then
+    env -u PYTHONPATH "${ENGINE_CMD[@]}" &
+  elif [ "$CURRENT_UID" -eq 0 ] && command_exists setpriv; then
+    env -u PYTHONPATH \
+        HOME="$(getent passwd "$RUNTIME_USER" | cut -d: -f6)" \
+        USER="$RUNTIME_USER" \
+        LOGNAME="$RUNTIME_USER" \
+      setpriv --reuid="$RUNTIME_USER" --regid="$(id -gn "$RUNTIME_USER")" --init-groups -- "${ENGINE_CMD[@]}" &
+  else
+    env -u PYTHONPATH "${ENGINE_CMD[@]}" &
+  fi
+  ENGINE_PID=$!
+  log "AI engine started (PID $ENGINE_PID)"
+fi
+
+if [ "$CURRENT_USER" = "$RUNTIME_USER" ]; then
+  "${JAVA_CMD[@]}" &
+elif [ "$CURRENT_UID" -eq 0 ] && command_exists setpriv; then
+  # Set HOME/USER/LOGNAME to match gosu behavior (setpriv does not touch env vars)
+  env HOME="$(getent passwd "$RUNTIME_USER" | cut -d: -f6)" \
+      USER="$RUNTIME_USER" \
+      LOGNAME="$RUNTIME_USER" \
+    setpriv --reuid="$RUNTIME_USER" --regid="$(id -gn "$RUNTIME_USER")" --init-groups -- "${JAVA_CMD[@]}" &
+else
+  warn_switch_user_once
+  "${JAVA_CMD[@]}" &
+fi
+
+JAVA_PID=$!
+
+# ---------- Background AOT Cache Generation ----------
+# On first boot (no valid cache), generate the AOT cache in the background so the app
+# starts immediately. The cache is ready for the NEXT boot (15-25% faster startup).
+AOT_GEN_PID=""
+if [ "$AOT_GENERATE_BACKGROUND" = true ]; then
+  # ARM devices need more memory for training due to JIT differences
+  _aot_min_mem=768
+  if [ "$(uname -m)" = "aarch64" ]; then
+    _aot_min_mem=1024
+  fi
+
+  if [ "$CONTAINER_MEM_MB" -gt "$_aot_min_mem" ] || [ "$CONTAINER_MEM_MB" -eq 0 ]; then
+    (
+      # Wait for Spring Boot to finish initializing before competing for CPU/memory.
+      # ARM devices (Raspberry Pi 4, Ampere) need extra time, 90s vs 45s on x86_64.
+      _startup_wait=45
+      if [ "$(uname -m)" = "aarch64" ]; then
+        _startup_wait=90
+        log "AOT: ARM, waiting ${_startup_wait}s for app stabilization before training"
+      fi
+      sleep "$_startup_wait"
+
+      if ! kill -0 "$JAVA_PID" 2>/dev/null; then
+        log "AOT: Main process exited; skipping cache generation."
+        exit 0
+      fi
+
+      _attempt=1
+      _max_attempts=2
+      while [ "$_attempt" -le "$_max_attempts" ]; do
+        log "AOT: Background cache generation attempt ${_attempt}/${_max_attempts}..."
+        _gen_rc=0
+        if [ -f /app/app.jar ] && [ -d /app/lib ]; then
+          generate_aot_cache "$AOT_CACHE" \
+            -cp "/app/app.jar:/app/lib/*" kagaz.software.SPDF.SPDFApplication || _gen_rc=$?
+        elif [ -f /app.jar ]; then
+          generate_aot_cache "$AOT_CACHE" -jar /app.jar || _gen_rc=$?
+        elif [ -d /app/BOOT-INF ]; then
+          # Spring Boot exploded layer layout, mirror the exact JAVA_CMD classpath
+          generate_aot_cache "$AOT_CACHE" \
+            -cp /app org.springframework.boot.loader.launch.JarLauncher || _gen_rc=$?
+        else
+          log "AOT: Cannot determine JAR layout; skipping cache generation."
+          exit 0
+        fi
+
+        if [ "$_gen_rc" -eq 0 ] && [ -f "$AOT_CACHE" ]; then
+          log "AOT: Cache ready for next boot!"
+          exit 0
+        fi
+
+        log "AOT: Attempt ${_attempt} failed (rc=${_gen_rc})"
+        _attempt=$((_attempt + 1))
+        if [ "$_attempt" -le "$_max_attempts" ]; then
+          if ! kill -0 "$JAVA_PID" 2>/dev/null; then
+            log "AOT: Main process exited during retry; aborting."
+            exit 0
+          fi
+          log "AOT: Retrying in 30s..."
+          sleep 30
+        fi
+      done
+      log "AOT: All attempts failed. App runs normally without cache."
+      log "AOT: To disable, set KAGAZ_AOT_ENABLE=false"
+    ) &
+    AOT_GEN_PID=$!
+    log "AOT: Background generation scheduled (PID $AOT_GEN_PID, arch=$(uname -m))"
+  else
+    log "AOT: Container memory (${CONTAINER_MEM_MB}MB) below minimum (${_aot_min_mem}MB on $(uname -m)), skipping cache generation"
+  fi
+fi
+
+exit_code=0
+wait "$JAVA_PID" || exit_code=$?
+
+if [ -n "$ENGINE_PID" ] && kill -0 "$ENGINE_PID" 2>/dev/null; then
+  log "Stopping AI engine (PID $ENGINE_PID)..."
+  kill "$ENGINE_PID" 2>/dev/null || true
+  wait "$ENGINE_PID" 2>/dev/null || true
+fi
+case "$exit_code" in
+  0)   log "Kagaz PDF exited normally." ;;
+  137) log "Kagaz PDF was OOM-killed (exit 137). Check container memory limits." ;;
+  143) log "Kagaz PDF terminated by SIGTERM (normal orchestrator shutdown)." ;;
+  *)   log "Kagaz PDF exited with code ${exit_code}." ;;
+esac
+# Propagate exit code so orchestrators can detect crashes vs clean shutdowns
+exit "${exit_code}"

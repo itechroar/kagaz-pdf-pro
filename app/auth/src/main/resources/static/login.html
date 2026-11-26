@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main><div class="card">
+<h1>Kagaz PDF</h1>
+<form id="login" autocomplete="on">
+<label for="u">Username</label><input id="u" name="username" autocomplete="username" required autofocus>
+<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
+<div id="cp" hidden>
+<label for="np">New password (min 8 characters)</label><input id="np" type="password" autocomplete="new-password" minlength="8">
+</div>
+<button type="submit" id="go">Sign in</button>
+<div class="err" id="msg" role="alert"></div>
+</form>
+<a id="sso" href="/api/v1/auth/sso/login" hidden><button type="button" class="sec">Sign in with SSO</button></a></div></main>
+<script src="/kagaz-auth/login.js"></script></body></html>

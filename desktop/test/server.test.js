@@ -1,0 +1,44 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert');
+const http = require('node:http');
+const os = require('node:os');
+const fs = require('node:fs');
+const path = require('node:path');
+const { freePort, javaBinary, buildArgs, waitForServer } = require('../src/server');
+
+test('freePort returns a usable loopback port', async () => {
+  const p = await freePort();
+  assert.ok(p > 0 && p < 65536);
+});
+
+test('javaBinary prefers bundled JRE, falls back to PATH', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kagaz-'));
+  assert.strictEqual(javaBinary(dir), 'java');
+  const exe = process.platform === 'win32' ? 'java.exe' : 'java';
+  fs.mkdirSync(path.join(dir, 'jre', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'jre', 'bin', exe), '');
+  assert.strictEqual(javaBinary(dir), path.join(dir, 'jre', 'bin', exe));
+});
+
+test('buildArgs binds to loopback on the chosen port', () => {
+  const a = buildArgs({ jar: '/x/kagaz-pdf.jar', port: 4321, dataDir: '/d' });
+  assert.ok(a.includes('-Dserver.port=4321'));
+  assert.ok(a.includes('-Dserver.address=127.0.0.1'));
+  assert.ok(a.some((x) => x.startsWith('-Dkagaz.base-path=/d')));
+  assert.deepStrictEqual(a.slice(-2), ['-jar', '/x/kagaz-pdf.jar']);
+});
+
+test('waitForServer resolves once the status endpoint answers 200', async () => {
+  let hits = 0;
+  const srv = http.createServer((req, res) => { res.statusCode = ++hits < 3 ? 503 : 200; res.end(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await waitForServer(srv.address().port, 5000, 20);
+  assert.ok(hits >= 3);
+  srv.close();
+});
+
+test('waitForServer rejects on timeout', async () => {
+  const p = await freePort();
+  await assert.rejects(waitForServer(p, 300, 50), /did not start/);
+});

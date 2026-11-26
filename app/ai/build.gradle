@@ -1,0 +1,7 @@
+bootRun {
+    enabled = false
+}
+
+dependencies {
+    implementation project(':common')
+}

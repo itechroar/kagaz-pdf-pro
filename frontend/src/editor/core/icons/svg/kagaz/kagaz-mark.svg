@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- Scale only, anchored at the origin: BrandMark.css morphs these paths with matrices written in the mark's own 71x79 units. -->
+  <g transform="scale(0.303797)">
+    <path class="sui-brandmark__a" d="M4 2 H44 L66 24 V77 H4 Z" />
+    <path class="sui-brandmark__b" d="M44 2 V24 H66 Z" />
+  </g>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <!-- Scale only, anchored at the origin: ChatPanel.css animates these paths in the mark's own 192x192 units. -->
+  <g transform="scale(0.125)">
+    <path class="kagaz-thinking__path-right" d="M108 8 V60 H160 Z" />
+    <path class="kagaz-thinking__path-left" d="M16 8 H108 L160 60 V184 H16 Z" />
+  </g>
+</svg>

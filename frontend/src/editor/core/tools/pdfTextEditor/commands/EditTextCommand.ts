@@ -1,0 +1,2849 @@
+import { liftRunToPage } from "@editor/tools/pdfTextEditor/commands/liftFromForm";
+import {
+  softStartsFor,
+  softStartsOf,
+} from "@editor/tools/pdfTextEditor/pdfium/lineBreaks";
+import {
+  needsShaping,
+  needsShapingMessage,
+} from "@editor/tools/pdfTextEditor/util/complexShaping";
+import { unsafeRtlEditMessage } from "@editor/tools/pdfTextEditor/commands/readOnlyText";
+import i18n from "i18next";
+import type { WrappedPdfiumModule } from "@embedpdf/pdfium";
+import {
+  RolledBackError,
+  type Command,
+  type PageRepaintArea,
+} from "@editor/tools/pdfTextEditor/commands/Command";
+import {
+  RENDER_MODE_INVISIBLE,
+  type PageRect,
+  type RGBA,
+} from "@editor/tools/pdfTextEditor/types";
+import type { EditorDocument } from "@editor/tools/pdfTextEditor/model/EditorDocument";
+import { readObjFill } from "@editor/tools/pdfTextEditor/pdfium/PdfiumObjectColour";
+import { PdfiumTextWriter } from "@editor/tools/pdfTextEditor/pdfium/PdfiumTextWriter";
+import {
+  sampleBackground,
+  measureScanInk,
+} from "@editor/tools/pdfTextEditor/pdfium/BackgroundSampler";
+import {
+  charcodesResolveFully,
+  objectTexts,
+  collectContainersByPtr,
+  contentIndices,
+  restoreContentOrder,
+  collectMemberPtrs,
+  droppedCharsSeen,
+  emitFillRect,
+  emitTextLine,
+  everyCharIn,
+  inkFromRun,
+  measureObjBoundsPt,
+  measureObjSpanPt,
+  moveObjectLeftEdgeTo,
+  removeMemberPtrs,
+  rotationFromMatrix,
+  warmOnPageAdvances,
+  planLineOrigins,
+  emitRunLines,
+  sliceFontSpans,
+  type FontSpan,
+} from "@editor/tools/pdfTextEditor/commands/editTextHelpers";
+import { deviceFamilyOf } from "@editor/tools/pdfTextEditor/util/deviceFontEmbed";
+import {
+  bestFontPtrForText,
+  applyParagraphEditPlan,
+  applyPartialEditPlan,
+  diffSpan,
+  planModifiesUndrawableWhitespace,
+  piecesFromObjects,
+  sourceFontSpans,
+  planUndoableParagraphEdit,
+  planUndoablePartialEdit,
+  redrawingUndrawableWhitespace,
+  revertPartialEditPlan,
+  setObjText,
+  type ParagraphEditPlan,
+  type PartialEditPlan,
+} from "@editor/tools/pdfTextEditor/commands/partialEdit";
+import {
+  fallbackFamilyFor,
+  fallbackFontIdFor,
+} from "@editor/tools/pdfTextEditor/util/fontCapability";
+import type { Page } from "@editor/tools/pdfTextEditor/model/Page";
+import type {
+  ParagraphLineSlot,
+  TextRun,
+} from "@editor/tools/pdfTextEditor/model/TextRun";
+import { transformObject } from "@editor/tools/pdfTextEditor/util/objectTransform";
+import {
+  readMatrix,
+  writeMatrix,
+} from "@editor/tools/pdfTextEditor/commands/textPieces";
+import { hasRtl } from "@editor/tools/pdfTextEditor/util/bidi";
+import {
+  applyBidiLineEdit,
+  drawsLetters,
+  planBidiLineEdit,
+} from "@editor/tools/pdfTextEditor/commands/bidiLineEdit";
+import {
+  SCRATCH,
+  scratchPtr,
+} from "@editor/tools/pdfTextEditor/util/wasmScratch";
+import {
+  captureScanEdit,
+  isScanRun,
+  renderScanEdit,
+  scanBlockBounds,
+} from "@editor/tools/pdfTextEditor/commands/scanTextEdit";
+import {
+  editedTags,
+  readRunTags,
+} from "@editor/tools/pdfTextEditor/commands/runTags";
+import {
+  sliceTags,
+  splitLines,
+  uniformTags,
+  type TextTags,
+} from "@editor/tools/pdfTextEditor/model/TextTags";
+import { MoveTextRunCommand } from "@editor/tools/pdfTextEditor/commands/MoveTextRunCommand";
+import {
+  type PushRecord,
+  pushRecords,
+  runsPulledBack,
+  setPushRecords,
+  runsPushedBelow,
+} from "@editor/tools/pdfTextEditor/commands/pushRunsBelow";
+
+interface RevertLine {
+  text: string;
+  tags: TextTags;
+  x: number;
+  y: number;
+  fill: { r: number; g: number; b: number; a: number };
+  fontSize: number;
+  /** Source run's letter-spacing so an undo re-emit keeps the tracking. */
+  charSpacingPt: number;
+}
+
+/** One rebuilt line for {@link EditTextCommand.rebuildAsOverlayModel}. */
+interface RebuildLine {
+  baselineY: number;
+  fontSize: number;
+  subRuns: Array<{
+    ptr: number;
+    text: string;
+    tags: TextTags;
+    x: number;
+    removed: boolean;
+  }>;
+}
+
+/** Snapshot of a run's paragraph model for the line-edit revert. */
+interface RunModelSnapshot {
+  text: string;
+  matrixE: number;
+  matrixF: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  paragraphLineHeight: number;
+  paragraphMemberPtrs: number[];
+  paragraphMemberContainers: number[];
+  paragraphMemberFs: number[];
+  paragraphLeafPtrs: number[];
+  paragraphLeafContainers: number[];
+  paragraphLineSlots: ParagraphLineSlot[];
+  mergedFromPtrs: number[];
+  mergedFromTexts: string[];
+  mergedFromBounds: Array<{ x: number; right: number }>;
+  mergedFromCharStarts: number[];
+  fontId: string;
+  fontSubset: boolean;
+  pdfiumObjPtr: number;
+}
+
+// A later step's undo redraws what this edit inserted as new objects, which `inserted` cannot name.
+function withGained(
+  m: WrappedPdfiumModule,
+  page: Page,
+  run: TextRun,
+  inserted: readonly number[],
+  before: RunModelSnapshot | null,
+  removed: ReadonlySet<number>,
+): number[] {
+  if (!before) return [...inserted];
+  const kept = new Set(
+    collectMemberPtrs(before).filter((ptr) => ptr && !removed.has(ptr)),
+  );
+  const onPage = new Set(
+    Array.from({ length: m.FPDFPage_CountObjects(page.pagePtr) }, (_, i) =>
+      m.FPDFPage_GetObject(page.pagePtr, i),
+    ),
+  );
+  if (![...kept].every((ptr) => onPage.has(ptr))) return [...inserted];
+  const containers = collectContainersByPtr(run);
+  const gained = collectMemberPtrs(run).filter(
+    (ptr) => ptr && !kept.has(ptr) && !containers.get(ptr),
+  );
+  return [...new Set([...inserted, ...gained])];
+}
+
+// Typed text has no font's shaping applied whichever face draws it, and with no face loaded for it the letters would be dropped instead. Read from the letter before, which a typed mark is set on.
+function typesUnshaped(prev: string, next: string): boolean {
+  const { start, nextEnd } = diffSpan(prev, next);
+  return needsShaping(next.slice(Math.max(0, start - 1), nextEnd));
+}
+
+/** What each object of the run reads as, by object. */
+function memberTexts(
+  doc: EditorDocument,
+  page: Page,
+  run: TextRun,
+): Map<number, string> {
+  const ptrs = collectMemberPtrs(run).filter((ptr) => ptr);
+  const texts = objectTexts(doc.module, page.pagePtr, ptrs) ?? [];
+  return new Map(ptrs.map((ptr, i) => [ptr, texts[i] ?? ""]));
+}
+
+// An object the edit drew or rewrote is drawn from code points, so any shaped cluster in it comes out wrong. An object that read as nothing is a glyph piece whose text an ActualText span gives to a neighbour, and moving the pair can hand the text to it instead.
+function drewUnshaped(
+  doc: EditorDocument,
+  page: Page,
+  run: TextRun,
+  before: ReadonlyMap<number, string>,
+): boolean {
+  for (const [ptr, text] of memberTexts(doc, page, run)) {
+    const was = before.get(ptr);
+    if (was !== "" && was !== text && needsShaping(text)) return true;
+  }
+  return false;
+}
+
+// True when a partial-edit plan only ADDED objects (no original object was
+// freed via removePtrs, none mutated in place via a "modify" op).
+function planIsPureInsert(plan: PartialEditPlan): boolean {
+  return (
+    plan.removePtrs.length === 0 && plan.ops.every((op) => op.type !== "modify")
+  );
+}
+
+const BLACK = { r: 0, g: 0, b: 0, a: 255 };
+// Cap height as a share of the em, near enough for the fallback faces.
+const CAP_HEIGHT_EM = 0.72;
+
+// OCR font sizes are a guess stretched by Tz; the scan's cap height is not.
+function scanFontSize(
+  ink: { y: number; height: number } | null,
+  baseline: number,
+  fallback: number,
+): number {
+  if (!ink) return fallback;
+  const size = (ink.y + ink.height - baseline) / CAP_HEIGHT_EM;
+  return size > 2 && size < ink.height * 3 ? size : fallback;
+}
+
+const UPRIGHT_TOLERANCE = 1e-6;
+const MIN_REPAINT_MARGIN_PT = 4;
+const REPAINT_MARGIN_PER_FONT_SIZE = 1.5;
+const PAGE_SPAN_PT = 100_000; // past any page edge; the bitmap clips the rest
+
+/** Edit a text run. */
+export class EditTextCommand implements Command {
+  readonly type = "edit-text";
+  private readonly pageIndex: number;
+  private readonly runId: string;
+  private readonly nextText: string;
+  private prevText: string | null = null;
+  /** `prevText`'s tags, read from the run's objects on the first apply. */
+  private prevTags: TextTags | null = null;
+  private readonly nextTagsOverride: TextTags | null;
+  private readonly nextFont: { ptr: number; id: string } | null;
+
+  private overlaid = false;
+  private prevObjPtr = 0;
+  private prevFontId: string | null = null;
+  /**
+   * The original object's PDFium font handle, captured before the overlay
+   * replaces it. Font handles are document-level and outlive the object, so
+   * the revert can re-emit in the run's OWN face instead of a base-14
+   * lookalike.
+   */
+  private prevFontPtr = 0;
+  // The run's face before this edit's first apply, whichever path the edit then takes.
+  private startFont: { ptr: number; id: string } | null = null;
+  private coverRectPtr = 0;
+  // Ink of an invisible OCR run this edit made visible, restored on revert.
+  private scanSource: { fill: TextRun["fill"]; fontSize: number } | null = null;
+  private createdPtrs: number[] = [];
+  /** Set when apply went through the word-level scanned-OCR path. */
+  private scanEdited = false;
+  private scanRefused = false;
+  // The box of a scanned block before this edit and around what it drew, so undo and redo put back exactly the size the overlay and inspector read.
+  private scanBounds: { before: PageRect; after: PageRect | null } | null =
+    null;
+  private newTextPtr = 0;
+  private revertLines: RevertLine[] = [];
+  /** Rotation of the run when apply() snapshotted it; re-applied on revert. */
+  private revertRotation: { cos: number; sin: number } | null = null;
+  /** Set when the apply path took the partial-edit (LCS) shortcut. */
+  private partialPlan: PartialEditPlan | null = null;
+  private partialInsertedPtrs: number[] = [];
+  private partialRedo: PartialRedo | null = null;
+  // A draw that left characters out is redrawn by a redo once their fonts arrive, so its objects are not kept for reuse.
+  private partialDrewAll = false;
+  private prevMergedFromPtrs: number[] = [];
+  private prevMergedFromTexts: string[] = [];
+  private prevMergedFromBounds: Array<{ x: number; right: number }> = [];
+  /** The font each pre-edit sub-run was drawn in (parallel to its ptrs). */
+  private prevMergedFromFonts: number[] = [];
+  /** The fill each pre-edit sub-run was drawn in (parallel to its ptrs). */
+  private prevMergedFromFills: Array<RGBA | null> = [];
+  /** The objects drawn by an apply that kept right-to-left text's own objects; null when it took another path. */
+  private bidiInsertedPtrs: number[] | null = null;
+  /** Set when the apply path took the paragraph-aware partial shortcut. */
+  private paragraphPlan: ParagraphEditPlan | null = null;
+  private paragraphInsertedPtrs: number[] = [];
+  private prevParagraphSlots: ParagraphLineSlot[] = [];
+  // Full pre-edit model snapshot, captured by the partial / paragraph-partial
+  // apply paths.
+  private editSnapshot: RunModelSnapshot | null = null;
+  // The run's own objects before a partial apply, with where each sat; null when one lives in a form and cannot be put back.
+  private originalObjects: OriginalObjects | null = null;
+  private revertedExactly = false;
+  /** Set when the apply path took the paragraph line add/remove shortcut. */
+  private lineEdit: {
+    /** Matched lines translated to a new baseline (reversed on revert). */
+    moves: Array<{ ptr: number; dy: number }>;
+    /** Fresh objects emitted for new/changed lines (removed on revert). */
+    createdPtrs: number[];
+    /** Deleted lines: put back as they were when they lived on the page itself, else re-emitted as fallback on revert. */
+    removed: Array<{
+      text: string;
+      tags: TextTags;
+      x: number;
+      y: number;
+      fontSize: number;
+      detached: Array<{ ptr: number; index: number }> | null;
+    }>;
+    prev: RunModelSnapshot;
+  } | null = null;
+
+  // Objects the last whole-burst replay drew for this run, kept on the burst's last edit: the next replay replaces and frees them.
+  private replayDrawn: number[] = [];
+  private readonly pushesBelow: boolean;
+  private readonly explicit: boolean;
+  // The runs below that this edit's added lines moved down, chosen on the first apply so a redo moves the same ones.
+  private pushes: MoveTextRunCommand[] | null = null;
+  // What the run was recorded as holding down before and after this edit, when the edit changed it.
+  private pushRecords: {
+    before: readonly PushRecord[];
+    after: readonly PushRecord[];
+  } | null = null;
+  // Which lines start at a wrap before and after this edit, so a later widening rejoins wraps and keeps typed breaks.
+  private softBefore: SoftStarts | null = null;
+  private softAfter: SoftStarts | null = null;
+
+  constructor(opts: {
+    pageIndex: number;
+    runId: string;
+    nextText: string;
+    nextTags?: TextTags | null;
+    nextFont?: { ptr: number; id: string } | null;
+    pushesBelow?: boolean;
+    explicit?: boolean;
+  }) {
+    this.pageIndex = opts.pageIndex;
+    this.runId = opts.runId;
+    this.nextText = opts.nextText;
+    this.nextTagsOverride = opts.nextTags ?? null;
+    this.nextFont = opts.nextFont ?? null;
+    this.pushesBelow = opts.pushesBelow ?? true;
+    this.explicit = opts.explicit ?? false;
+  }
+
+  apply(doc: EditorDocument): void {
+    const page = doc.page(this.pageIndex);
+    const run = page.findRun(this.runId);
+    const deciding =
+      this.pushes === null &&
+      this.pushesBelow &&
+      run !== undefined &&
+      !isScanRun(run);
+    const lines = run ? lineCount(this.nextText) - lineCount(run.text) : 0;
+    const oldBottom = run?.bounds.y ?? 0;
+    const shaped = run !== undefined && needsShaping(this.nextText);
+    if (shaped && typesUnshaped(run.text, this.nextText))
+      throw new RolledBackError(new Error(needsShapingMessage()));
+    const membersBefore = shaped ? memberTexts(doc, page, run) : null;
+    const softBefore = run ? softStartsNow(run) : null;
+    this.applyEdit(doc);
+    if (run && membersBefore && drewUnshaped(doc, page, run, membersBefore)) {
+      this.revertEdit(doc);
+      throw new RolledBackError(new Error(needsShapingMessage()));
+    }
+    if (this.pushes === null) {
+      if (!deciding || this.scanEdited || lines === 0) this.pushes = [];
+      else if (lines > 0) {
+        const lineHeight =
+          run.paragraphLineHeight > 0
+            ? run.paragraphLineHeight
+            : run.fontSize * 1.2;
+        const { runIds, dy } = runsPushedBelow(
+          page,
+          run,
+          oldBottom,
+          lines * lineHeight,
+        );
+        this.pushes = runIds.map((runId) => this.moveBelow(runId, dy));
+        if (runIds.length > 0)
+          this.pushRecords = {
+            before: pushRecords(run),
+            after: [
+              ...pushRecords(run),
+              {
+                lineCount: lineCount(this.nextText),
+                linesAdded: lines,
+                runIds,
+                dy,
+              },
+            ],
+          };
+      } else {
+        // By lines, not ink: a blank line holds the text below down without drawing anything.
+        const { moves, records } = runsPulledBack(
+          page,
+          run,
+          lineCount(this.nextText),
+        );
+        this.pushes = moves.map(({ runId, dy }) => this.moveBelow(runId, dy));
+        this.pushRecords = { before: pushRecords(run), after: records };
+      }
+    }
+    if (run && softBefore) {
+      this.softBefore ??= softBefore;
+      this.softAfter ??= {
+        flags: softStartsFor(run.text, softBefore.text, softBefore.flags),
+        text: run.text,
+      };
+      setSoftStarts(run, this.softAfter);
+    }
+    this.redoPushes(doc);
+  }
+
+  private moveBelow(runId: string, dy: number): MoveTextRunCommand {
+    return new MoveTextRunCommand({
+      pageIndex: this.pageIndex,
+      runId,
+      dx: 0,
+      dy,
+    });
+  }
+
+  private redoPushes(doc: EditorDocument): void {
+    const run = doc.page(this.pageIndex).findRun(this.runId);
+    for (const push of this.pushes ?? []) push.apply(doc);
+    if (run && this.pushRecords) setPushRecords(run, this.pushRecords.after);
+  }
+
+  private undoPushes(doc: EditorDocument): void {
+    const run = doc.page(this.pageIndex).findRun(this.runId);
+    for (const push of [...(this.pushes ?? [])].reverse()) push.revert(doc);
+    if (run && this.pushRecords) setPushRecords(run, this.pushRecords.before);
+  }
+
+  private applyEdit(doc: EditorDocument): void {
+    const page = doc.page(this.pageIndex);
+    const run = page.findRun(this.runId);
+    if (!run) return;
+    this.originalObjects = null;
+    this.revertedExactly = false;
+    if (this.prevText === null) this.prevText = run.text;
+    if (!this.startFont && run.containerPtr === 0 && run.pdfiumObjPtr) {
+      const ptr = safeGetFont(doc.module, run.pdfiumObjPtr);
+      if (ptr) this.startFont = { ptr, id: run.fontId };
+    }
+    // No-op edit: a contentEditable insert can fire several `input` events for
+    // one keystroke burst, re-dispatching the SAME final text.
+    if (this.prevText === this.nextText) return;
+    if (run.textReadOnly && !this.scanEdited && !isScanRun(run))
+      throw new RolledBackError(new Error(unsafeRtlEditMessage()));
+    liftRunToPage(doc, page, run);
+
+    if (this.scanEdited || isScanRun(run)) {
+      run.scanEdit ??= captureScanEdit(doc.module, run, page);
+      if (run.scanEdit) {
+        this.scanEdited = true;
+        this.scanBounds ??= { before: { ...run.bounds }, after: null };
+        this.scanRefused = !renderScanEdit(
+          doc,
+          page,
+          run,
+          run.scanEdit,
+          this.nextText,
+        );
+        if (!this.scanRefused) {
+          this.scanBounds.after ??= scanBlockBounds(doc, run);
+          if (this.scanBounds.after) run.bounds = { ...this.scanBounds.after };
+        }
+        return;
+      }
+    }
+
+    this.prevTags ??= readRunTags(doc, page, run);
+    const nextTags =
+      this.nextTagsOverride ??
+      editedTags(
+        doc,
+        this.pageIndex,
+        this.prevTags,
+        this.prevText,
+        this.nextText,
+        run.tagMarks,
+      );
+
+    if (this.redoPartialEdit(doc, page, run)) return;
+
+    const alreadyBase14 = /^base14:/.test(run.fontId);
+    // Invisible OCR text over a scan: rewrite the whole run visibly so the
+    // scanned ink can be covered, never patch its hidden objects in place.
+    const scanText = isScanRun(run);
+    // A run rotated within the page can't use the surgical partial/paragraph
+    // paths - those assume horizontal layout.
+    const isRotated = !!rotationFromMatrix(run.matrix);
+    // Only the full re-emit below can switch the run to a given face.
+    const keepsFont = this.nextFont === null;
+    // The partial paths shift pieces rightward from where they were; only the full re-emit lays out right-to-left text.
+    const leftToRight = !hasRtl(this.prevText ?? "") && !hasRtl(this.nextText);
+
+    if (
+      !leftToRight &&
+      this.nextText.length > 0 &&
+      run.wrapWidthPt === null &&
+      !isRotated &&
+      !scanText &&
+      keepsFont &&
+      this.applyKeepingLineObjects(doc, page, run, nextTags)
+    )
+      return;
+
+    // PARAGRAPH-AWARE PARTIAL PATH: paragraphs (multi-line runs) keep per-line
+    // sub-run data in `paragraphLineSlots`.
+    if (
+      this.partialPlan === null &&
+      this.paragraphPlan === null &&
+      run.paragraphLineSlots.length > 1 &&
+      !isRotated &&
+      !scanText &&
+      keepsFont &&
+      leftToRight
+    ) {
+      const planned = planUndoableParagraphEdit(
+        doc.module,
+        page.pagePtr,
+        run,
+        this.prevText ?? "",
+        this.nextText,
+      );
+      const paraPlan =
+        planned &&
+        redrawingUndrawableWhitespace(
+          doc.module,
+          planned,
+          page.pagePtr,
+          doc.docPtr,
+        );
+      if (paraPlan) {
+        this.paragraphPlan = paraPlan;
+        this.prevParagraphSlots = paraPlan.prevSlots;
+        this.editSnapshot = snapshotRunModel(run);
+        this.originalObjects = captureOriginalObjects(
+          doc.module,
+          run,
+          paraPlan.prevSlots.flatMap((slot) => slot.mergedFromPtrs),
+          paraPlan.perSlot.flatMap((entry) =>
+            entry.plan
+              ? entry.plan.removePtrs
+              : paraPlan.prevSlots[entry.slotIdx].mergedFromPtrs.map((ptr) => ({
+                  ptr,
+                  containerPtr: -1,
+                })),
+          ),
+          page.pagePtr,
+        );
+        const result = applyParagraphEditPlan(
+          doc,
+          page,
+          run,
+          paraPlan,
+          nextTags,
+        );
+        this.paragraphInsertedPtrs = result.insertedPtrs;
+        run.paragraphLineSlots = result.newSlots;
+        run.bounds = {
+          ...run.bounds,
+          x: result.newBoundsX,
+          width: clampWidthToPage(
+            result.newBoundsX,
+            result.newBoundsWidth,
+            page,
+          ),
+        };
+        // Keep mergedFrom* synchronized with slot[0] so a later
+        // single-line partial edit on the rep continues to work.
+        const firstSlot = result.newSlots[0];
+        run.mergedFromPtrs = [...firstSlot.mergedFromPtrs];
+        run.mergedFromTexts = [...firstSlot.mergedFromTexts];
+        run.mergedFromBounds = firstSlot.mergedFromBounds.map((b) => ({
+          ...b,
+        }));
+        run.mergedFromCharStarts = [...firstSlot.mergedFromCharStarts];
+        if (firstSlot.mergedFromPtrs.length > 0) {
+          run.pdfiumObjPtr = firstSlot.mergedFromPtrs[0];
+        }
+        run.text = this.nextText;
+        run.dirty = true;
+        page.markDirty();
+        page.markNeedsGenerate();
+        return;
+      }
+    }
+
+    // PARAGRAPH LINE ADD/REMOVE PATH.
+    if (
+      this.partialPlan === null &&
+      this.paragraphPlan === null &&
+      this.lineEdit === null &&
+      this.prevText !== null &&
+      this.prevText.length > 0 &&
+      run.paragraphLineSlots.length >= 1 &&
+      !isRotated &&
+      !scanText &&
+      keepsFont &&
+      leftToRight
+    ) {
+      const prevLines = this.prevText.split(/\r?\n/);
+      const nextLines = this.nextText.split(/\r?\n/);
+      if (prevLines.length !== nextLines.length) {
+        if (run.paragraphLineSlots.length === prevLines.length) {
+          // Slots map 1:1 to lines (a grow-mode paragraph) - diff per line.
+          this.applyParagraphLineEdit(
+            doc,
+            page,
+            run,
+            prevLines,
+            nextLines,
+            this.prevTags,
+            nextTags,
+          );
+          run.text = this.nextText;
+          run.dirty = true;
+          page.markDirty();
+          page.markNeedsGenerate();
+          return;
+        }
+        if (
+          this.nextText.startsWith(this.prevText) &&
+          /^\r?\n/.test(this.nextText.slice(this.prevText.length))
+        ) {
+          // Soft-wrapped paragraph: can't diff per line.
+          this.applyParagraphAppend(doc, page, run, nextTags);
+          run.text = this.nextText;
+          run.dirty = true;
+          page.markDirty();
+          page.markNeedsGenerate();
+          return;
+        }
+      }
+    }
+
+    // SURGICAL DIFF PATH (single-line).
+    if (
+      this.partialPlan === null &&
+      run.mergedFromPtrs.length > 0 &&
+      run.paragraphLineSlots.length < 2 &&
+      !/\r?\n/.test(this.nextText) &&
+      !isRotated &&
+      !scanText &&
+      keepsFont &&
+      leftToRight
+    ) {
+      const partial = planUndoablePartialEdit(
+        doc.module,
+        page.pagePtr,
+        run,
+        this.prevText ?? "",
+        this.nextText,
+      );
+      if (
+        partial &&
+        !planModifiesUndrawableWhitespace(
+          doc.module,
+          partial,
+          page.pagePtr,
+          doc.docPtr,
+        )
+      ) {
+        this.partialPlan = partial;
+        this.prevMergedFromPtrs = [...run.mergedFromPtrs];
+        this.prevMergedFromTexts = [...run.mergedFromTexts];
+        this.prevMergedFromBounds = run.mergedFromBounds.map((b) => ({ ...b }));
+        this.prevMergedFromFonts = run.mergedFromPtrs.map((ptr) =>
+          safeGetFont(doc.module, ptr),
+        );
+        this.prevMergedFromFills = run.mergedFromPtrs.map((ptr) =>
+          readObjFill(doc.module, ptr),
+        );
+        this.editSnapshot = snapshotRunModel(run);
+        this.originalObjects = captureOriginalObjects(
+          doc.module,
+          run,
+          run.mergedFromPtrs,
+          partial.removePtrs,
+          page.pagePtr,
+        );
+        const drops = droppedCharsSeen();
+        const result = applyPartialEditPlan(doc, page, run, partial, nextTags);
+        this.partialDrewAll = droppedCharsSeen() === drops;
+        this.partialInsertedPtrs = result.insertedPtrs;
+        // A reflow leaves a one-line run's objects in paragraphLeafPtrs too,
+        // and that list wins over mergedFromPtrs wherever the run's objects
+        // are collected: a letter left out of it is dropped by the next reflow.
+        if (run.paragraphLeafPtrs.length > 0) {
+          const containerOf = new Map(
+            run.paragraphLeafPtrs.map((ptr, i) => [
+              ptr,
+              run.paragraphLeafContainers[i] ?? run.containerPtr,
+            ]),
+          );
+          run.paragraphLeafPtrs = [...result.newMergedFromPtrs];
+          run.paragraphLeafContainers = result.newMergedFromPtrs.map(
+            (ptr) => containerOf.get(ptr) ?? run.containerPtr,
+          );
+        }
+        run.mergedFromPtrs = result.newMergedFromPtrs;
+        run.mergedFromTexts = result.newMergedFromTexts;
+        run.mergedFromBounds = result.newMergedFromBounds;
+        run.mergedFromCharStarts = result.newMergedFromCharStarts;
+        run.bounds = {
+          ...run.bounds,
+          x: result.newBoundsX,
+          width: clampWidthToPage(
+            result.newBoundsX,
+            result.newBoundsWidth,
+            page,
+          ),
+        };
+        if (result.newMergedFromPtrs.length > 0) {
+          run.pdfiumObjPtr = result.newMergedFromPtrs[0];
+        }
+        run.text = this.nextText;
+        run.dirty = true;
+        page.markDirty();
+        return;
+      }
+    }
+
+    // Force overlay whenever the in-place SetText path can't keep every PDFium
+    // object up to date: - paragraphs or newline-containing text.
+    const needsMultiObjectEmit =
+      run.paragraphMemberPtrs.length > 1 ||
+      run.paragraphLeafPtrs.length > 1 ||
+      /\r?\n/.test(this.nextText) ||
+      /\s\s/.test(this.nextText);
+    const needsOverlay =
+      scanText ||
+      needsMultiObjectEmit ||
+      (!this.overlaid &&
+        !alreadyBase14 &&
+        (run.mergedFromPtrs.length > 0 ||
+          run.fontSubset ||
+          run.pdfiumObjPtr !== 0));
+
+    if (!needsOverlay) {
+      const restoreText = run.text;
+      const restoreBounds = run.bounds;
+      run.text = this.nextText;
+      run.dirty = true;
+      page.markDirty();
+      if (PdfiumTextWriter.commitRunText(doc, page, run)) return;
+      // The object's font could not encode the new text - `run.fontId` said
+      // base-14 but `pdfiumObjPtr` still pointed at the original (Type 3 /
+      // symbolic subset) object, so SetText wrote filler charcodes. Undo and
+      // take the overlay path, which resolves charcodes and validates the emit.
+      run.text = restoreText;
+      run.bounds = restoreBounds;
+    }
+
+    this.overlaid = true;
+    this.prevObjPtr = run.pdfiumObjPtr;
+    if (this.prevFontId === null) this.prevFontId = run.fontId;
+    if (this.prevFontPtr === 0 && run.containerPtr === 0 && run.pdfiumObjPtr) {
+      this.prevFontPtr = safeGetFont(doc.module, run.pdfiumObjPtr);
+    }
+    const fallbackFamily = fallbackFamilyFor(this.prevFontId);
+    const m = doc.module;
+
+    const bg = sampleBackground(m, page, run.bounds);
+    // Measure the scanned glyphs before anything covers them.
+    const scanInk = scanText
+      ? (measureScanInk(m, page, {
+          x0: run.bounds.x,
+          x1: run.bounds.x + run.bounds.width,
+          bottom: run.bounds.y,
+          top: run.bounds.y + run.bounds.height,
+        }) ?? { fill: BLACK, rect: run.bounds, baseline: null })
+      : null;
+    // \r/\n are split into separate output lines, so they must NOT gate font
+    // reuse.
+    const safeChars = everyCharIn(
+      this.nextText.replace(/[\r\n]/g, ""),
+      this.prevText ?? "",
+    );
+    // Reusing the source font handle works when every nextText char already
+    // appears in prevText, which guarantees a glyph. That proxy is strict: it
+    // threw away a fully embedded face the moment a NEW letter was typed. So
+    // also accept the case where the charcodes provably resolve for the whole
+    // string, which is exactly what the emit path needs to succeed.
+    const candidateFontPtr = run.pdfiumObjPtr
+      ? safeGetFont(m, run.pdfiumObjPtr)
+      : 0;
+    const canReuseFont =
+      run.containerPtr === 0 &&
+      (safeChars ||
+        charcodesResolveFully(
+          m,
+          candidateFontPtr,
+          this.nextText.replace(/[\r\n]/g, ""),
+          page.pagePtr,
+          doc.docPtr,
+        ));
+    // Borrow the font of the member sharing the most chars with the new text.
+    const borrowPtrs = collectMemberPtrs(run);
+    // A full re-emit leaves the run's piece texts out of step with its objects, so each is read off the page.
+    const borrowTexts =
+      run.mergedFromTexts.length === borrowPtrs.length
+        ? run.mergedFromTexts
+        : (objectTexts(m, page.pagePtr, borrowPtrs) ??
+          borrowPtrs.map(() => run.text));
+    // A font that cannot draw every new character still draws the words it can.
+    const coveredWordsOnly =
+      !this.nextFont &&
+      !canReuseFont &&
+      !scanText &&
+      run.containerPtr === 0 &&
+      candidateFontPtr !== 0;
+    const originalFontPtr =
+      this.nextFont?.ptr ||
+      (canReuseFont && !scanText
+        ? bestFontPtrForText(m, borrowPtrs, borrowTexts, this.nextText) ||
+          (run.pdfiumObjPtr ? safeGetFont(m, run.pdfiumObjPtr) : 0)
+        : coveredWordsOnly
+          ? bestFontPtrForText(m, borrowPtrs, borrowTexts, this.nextText) ||
+            candidateFontPtr
+          : 0);
+    // Read before the source objects go: a run mixing bold and regular keeps each word's face, and a letter
+    // drawn in another font because the run's own lacks it stays in that font.
+    const oneLine =
+      !/\n/.test(this.prevText ?? "") && !/\n/.test(this.nextText);
+    // A paragraph's own pieces are those of its first line only, so its lines are read off the page.
+    const pieces =
+      oneLine && run.mergedFromPtrs.length > 0
+        ? run
+        : (piecesFromObjects(
+            m,
+            page.pagePtr,
+            oneLine ? run.paragraphLeafPtrs : borrowPtrs,
+            this.prevText ?? "",
+          ) ?? (oneLine ? run : null));
+    const fontSpans =
+      !this.nextFont && !scanText && pieces
+        ? editedFontSpans(doc, page, pieces, this.prevText ?? "", this.nextText)
+        : undefined;
+
+    this.revertLines = snapshotRevertLines(
+      run,
+      this.prevText ?? "",
+      this.prevTags,
+    );
+    this.revertRotation = rotationFromMatrix(run.matrix) ?? null;
+
+    // Detach any cover rect that a PRIOR overlay edit left on the page.
+    if (run.coverRectPtr) {
+      try {
+        m.FPDFPage_RemoveObject(page.pagePtr, run.coverRectPtr);
+      } catch {
+        /* best-effort */
+      }
+      run.coverRectPtr = 0;
+    }
+
+    // Measure the page's glyph advances BEFORE the source objects go away:
+    // for a Type 3 face this is the only place a real advance can come from.
+    warmOnPageAdvances(m, page.pagePtr);
+
+    const memberPtrs = collectMemberPtrs(run);
+    const containers = collectContainersByPtr(run);
+    this.editSnapshot = snapshotRunModel(run);
+    this.originalObjects = captureOriginalObjects(
+      m,
+      run,
+      memberPtrs,
+      memberPtrs.map((ptr) => ({
+        ptr,
+        containerPtr: containers.get(ptr) ?? run.containerPtr,
+      })),
+      page.pagePtr,
+    );
+    const allRemoved = removeMemberPtrs(
+      m,
+      page,
+      memberPtrs,
+      containers,
+      run.containerPtr,
+    );
+
+    // Only stamp a cover rect when the sampler is CONFIDENT it found a uniform
+    // background colour.
+    if (!allRemoved && bg.confident) {
+      this.coverRectPtr = emitFillRect(m, page, run.bounds, bg.fill);
+      if (this.coverRectPtr) {
+        this.createdPtrs.push(this.coverRectPtr);
+        run.coverRectPtr = this.coverRectPtr;
+      }
+    }
+    if (scanInk) {
+      const coverRect = scanInk.rect;
+      const paper = sampleBackground(m, page, coverRect);
+      // Kept off run.coverRectPtr so later edits of this run never lift it.
+      const scanCover = emitFillRect(
+        m,
+        page,
+        coverRect,
+        paper.confident ? paper.fill : bg.fill,
+        // The box is measured ink already; wide padding clips the next line.
+        0.5,
+      );
+      if (scanCover) this.createdPtrs.push(scanCover);
+      this.scanSource = { fill: run.fill, fontSize: run.fontSize };
+      run.fill = scanInk.fill;
+      run.renderMode = 0;
+      run.fontSize = scanFontSize(scanInk.rect, run.matrix.f, run.fontSize);
+    }
+
+    const outputLines = this.nextText.split(/\r?\n/);
+    const lineHeight =
+      run.paragraphLineHeight > 0
+        ? run.paragraphLineHeight
+        : run.fontSize * 1.2;
+    // One "line anchor" ptr per output line; plus any extra per-word ptrs from
+    // space preservation, kept for leaf removal on subsequent edits.
+    const lineAnchorPtrs: number[] = [];
+    const lineAnchorYs: number[] = [];
+    const allEmittedPtrs: number[] = [];
+    // Per-line emit metadata used to rebuild paragraphLineSlots so the NEXT
+    // edit can route back through paragraph-aware partial-edit instead of.
+    const perLineEmits: Array<{
+      ptrs: number[];
+      texts: string[];
+      text: string;
+      x: number;
+      y: number;
+    }> = [];
+    const emitted = emitRunLines({
+      doc,
+      page,
+      run,
+      lines: splitLines(this.nextText, nextTags),
+      origins: planLineOrigins(run, outputLines.length, lineHeight),
+      originalFontPtr,
+      originalFontSubset: run.fontSubset,
+      originalFontForCoveredWords: coveredWordsOnly,
+      fallbackFamily,
+      fontSpansByLine: fontSpans && spansByLine(fontSpans, this.nextText),
+    });
+    for (const line of emitted) {
+      // Empty lines keep a placeholder slot; a FAILED emit is dropped entirely.
+      if (line.text.length === 0) {
+        perLineEmits.push({
+          ptrs: [],
+          texts: [],
+          text: "",
+          x: line.x,
+          y: line.y,
+        });
+        continue;
+      }
+      if (line.ptrs.length === 0) {
+        // A line whose emit produced nothing still owns its character range.
+        // Skipping it shifts every later slot onto the wrong line of run.text.
+        perLineEmits.push({
+          ptrs: [],
+          texts: [],
+          text: line.text,
+          x: line.x,
+          y: line.y,
+        });
+        continue;
+      }
+      this.createdPtrs.push(...line.ptrs);
+      allEmittedPtrs.push(...line.ptrs);
+      lineAnchorPtrs.push(line.ptrs[0]);
+      lineAnchorYs.push(line.y);
+      perLineEmits.push({
+        ptrs: line.ptrs,
+        texts: line.texts,
+        text: line.text,
+        x: line.x,
+        y: line.y,
+      });
+    }
+
+    if (lineAnchorPtrs.length > 0) {
+      this.newTextPtr = lineAnchorPtrs[0];
+      run.pdfiumObjPtr = lineAnchorPtrs[0];
+      // A line kept in its own pieces' faces is still the document's font, not a base-14 one to SetText over.
+      if (originalFontPtr === 0 && !fontSpans) {
+        run.fontId = fallbackFontIdFor(fallbackFamily);
+        run.fontSubset = false;
+      } else if (originalFontPtr !== 0) {
+        // Borrow path: the new objects use the borrowed font handle.
+        if (this.nextFont) run.fontId = this.nextFont.id;
+        run.fontSubset = false;
+      }
+      run.paragraphMemberPtrs = lineAnchorPtrs;
+      run.paragraphMemberContainers = lineAnchorPtrs.map(() => 0);
+      run.paragraphMemberFs = [...lineAnchorYs];
+      // Every per-word emit becomes a leaf - so the next edit's removal
+      // pass cleans them up alongside the anchors.
+      run.paragraphLeafPtrs = allEmittedPtrs;
+      run.paragraphLeafContainers = allEmittedPtrs.map(() => 0);
+      if (perLineEmits.length > 1) {
+        // Remember the line height so paragraph-partial / future overlay
+        // emits land at the same baselines we just established.
+        run.paragraphLineHeight = lineHeight;
+      }
+    } else {
+      run.pdfiumObjPtr = 0;
+      run.paragraphMemberPtrs = [];
+      run.paragraphMemberContainers = [];
+      run.paragraphMemberFs = [];
+      run.paragraphLeafPtrs = [];
+      run.paragraphLeafContainers = [];
+      run.bounds = { ...run.bounds, width: 0 };
+    }
+
+    run.mergedFromPtrs = [];
+    // Clear the parallel arrays too: planPartialEdit bails on length mismatch.
+    run.mergedFromTexts = [];
+    run.mergedFromBounds = [];
+    run.mergedFromCharStarts = [];
+    // Rebuild paragraphLineSlots from the fresh emit so the next edit on this
+    // paragraph can re-engage the font-preserving partial path.
+    if (perLineEmits.length > 1) {
+      run.paragraphLineSlots = buildSlotsFromOverlayEmit(
+        m,
+        run,
+        perLineEmits,
+        originalFontPtr === 0 ? fallbackFontIdFor(fallbackFamily) : run.fontId,
+      );
+    } else {
+      // Single-line emit.
+      run.paragraphLineSlots = [];
+    }
+    // Don't reset paragraphLeafPtrs here - we just set them above to the
+    // freshly-emitted chunks so the next overlay edit can remove them.
+    // The emit replaced every object this run owns, so the old bounds can
+    // describe geometry that is gone - a box narrower than its own glyphs
+    // leaves the overlay unusable over correctly drawn text. Only ever GROW it
+    // here: trailing whitespace legitimately extends a box past its ink, and
+    // shrinking to the ink would erase that.
+    const span = measureObjSpanPt(m, allEmittedPtrs);
+    if (span) {
+      const left = Math.min(run.bounds.x, span.left);
+      const right = Math.max(run.bounds.x + run.bounds.width, span.right);
+      run.bounds = { ...run.bounds, x: left, width: Math.max(0, right - left) };
+    }
+    const addedLines = outputLines.length - this.prevText.split(/\r?\n/).length;
+    if (addedLines > 0 && !rotationFromMatrix(run.matrix)) {
+      const drop = addedLines * lineHeight;
+      run.bounds = {
+        ...run.bounds,
+        y: run.bounds.y - drop,
+        height: run.bounds.height + drop,
+      };
+    }
+    run.text = this.nextText;
+    run.dirty = true;
+    page.markDirty();
+    page.markNeedsGenerate();
+    // A whole redraw finds no font for some right-to-left letters and leaves them out. Letters the run already drew are put back and the edit refused; a typed letter still waits for its script's font.
+    if (
+      !leftToRight &&
+      !scanText &&
+      allRemoved &&
+      this.originalObjects !== null &&
+      !drawsLetters(
+        m,
+        page,
+        allEmittedPtrs,
+        keptText(this.prevText, this.nextText),
+      )
+    ) {
+      this.revertEdit(doc);
+      throw new RolledBackError(new Error(unsafeRtlEditMessage()));
+    }
+  }
+
+  // Edit a run holding right-to-left text by moving the objects the edit leaves alone and drawing only what it changes. False, with nothing changed, when the run's objects do not draw its text the way the editor lays it out; throws when what it must redraw no font can draw.
+  private applyKeepingLineObjects(
+    doc: EditorDocument,
+    page: Page,
+    run: TextRun,
+    nextTags: TextTags,
+  ): boolean {
+    const prev = this.prevText ?? "";
+    const plan = planBidiLineEdit(doc, page, run, prev, this.nextText);
+    if (!plan) return false;
+    const snapshot = snapshotRunModel(run);
+    const originals = captureOriginalObjects(
+      doc.module,
+      run,
+      plan.ptrs,
+      plan.removePtrs.map((ptr) => ({ ptr, containerPtr: 0 })),
+      page.pagePtr,
+    );
+    if (!originals) return false;
+    const result = applyBidiLineEdit(doc, page, run, prev, plan, nextTags);
+    if (!result) throw new RolledBackError(new Error(unsafeRtlEditMessage()));
+    this.editSnapshot = snapshot;
+    this.originalObjects = originals;
+    this.bidiInsertedPtrs = result.insertedPtrs;
+    const drawn = result.lines.filter((line) => line.ptrs.length > 0);
+    const all = result.lines.flatMap((line) => line.ptrs);
+    const [only] = result.lines;
+    const oneLine = result.lines.length === 1;
+    run.mergedFromPtrs = oneLine ? only.ptrs : [];
+    run.mergedFromTexts = oneLine ? only.texts : [];
+    run.mergedFromBounds = oneLine ? only.bounds : [];
+    run.mergedFromCharStarts = oneLine ? only.charStarts : [];
+    run.paragraphMemberPtrs = oneLine ? [] : drawn.map((line) => line.ptrs[0]);
+    run.paragraphMemberContainers = run.paragraphMemberPtrs.map(() => 0);
+    run.paragraphMemberFs = oneLine ? [] : drawn.map((line) => line.y);
+    run.paragraphLeafPtrs = oneLine ? [] : all;
+    run.paragraphLeafContainers = run.paragraphLeafPtrs.map(() => 0);
+    run.paragraphLineSlots = oneLine
+      ? []
+      : buildSlotsFromOverlayEmit(doc.module, run, result.lines, run.fontId);
+    const lineHeight =
+      run.paragraphLineHeight > 0
+        ? run.paragraphLineHeight
+        : run.fontSize * 1.2;
+    if (!oneLine) run.paragraphLineHeight = lineHeight;
+    run.pdfiumObjPtr = all[0] ?? run.pdfiumObjPtr;
+    const drop = (result.lines.length - prev.split("\n").length) * lineHeight;
+    run.bounds = {
+      x: result.left,
+      y: run.bounds.y - drop,
+      width: clampWidthToPage(result.left, result.right - result.left, page),
+      height: run.bounds.height + drop,
+    };
+    run.text = this.nextText;
+    run.dirty = true;
+    page.markDirty();
+    page.markNeedsGenerate();
+    return true;
+  }
+
+  private prevTagsOf(run: TextRun, start: number, end: number): TextTags {
+    return this.prevTags
+      ? sliceTags(this.prevTags, start, end)
+      : uniformTags(run.tagMarks);
+  }
+
+  // Taken before the revert detaches what the apply drew, while those objects still sit where it put them.
+  private capturePartialRedo(
+    m: WrappedPdfiumModule,
+    page: Page,
+    run: TextRun,
+    inserted: readonly number[],
+  ): PartialRedo | null {
+    const plan = this.partialPlan;
+    const originals = this.originalObjects;
+    const before = this.editSnapshot;
+    if (!plan || !originals || !before || !this.partialDrewAll) return null;
+    const after = collectMemberPtrs(run).filter(Boolean);
+    const matrices = new Map<number, Float32Array>();
+    for (const ptr of after) {
+      const matrix = readMatrix(m, ptr);
+      if (!matrix) return null;
+      matrices.set(ptr, matrix);
+    }
+    const order = contentIndices(m, page.pagePtr, after);
+    if (order.size !== new Set(after).size) return null;
+    const kept = new Set(after);
+    return {
+      plan,
+      originals,
+      inserted: [...inserted],
+      detach: collectMemberPtrs(before).filter((ptr) => ptr && !kept.has(ptr)),
+      modified: plan.ops.flatMap((op) =>
+        op.type === "modify" &&
+        op.subRunIdx !== undefined &&
+        op.text !== undefined
+          ? [{ ptr: plan.prevMergedFromPtrs[op.subRunIdx], text: op.text }]
+          : [],
+      ),
+      matrices,
+      order,
+      model: snapshotRunModel(run),
+    };
+  }
+
+  // A redo puts back the very objects the apply drew, rather than drawing new ones: a later step of the burst holds them, and the replaced ones would be left detached with nothing to free them.
+  private redoPartialEdit(
+    doc: EditorDocument,
+    page: Page,
+    run: TextRun,
+  ): boolean {
+    const redo = this.partialRedo;
+    this.partialRedo = null;
+    const before = this.editSnapshot;
+    if (!redo || !before || run.text !== this.prevText) return false;
+    const members = collectMemberPtrs(run);
+    const expected = collectMemberPtrs(before);
+    if (
+      members.length !== expected.length ||
+      members.some((ptr, i) => ptr !== expected[i])
+    )
+      return false;
+    const m = doc.module;
+    for (const ptr of redo.detach) m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+    for (const { ptr, text } of redo.modified) setObjText(doc, page, ptr, text);
+    for (const ptr of redo.inserted) m.FPDFPage_InsertObject(page.pagePtr, ptr);
+    for (const [ptr, matrix] of redo.matrices) writeMatrix(m, ptr, matrix);
+    restoreContentOrder(
+      m,
+      page.pagePtr,
+      [...redo.order].map(([ptr, index]) => ({ ptr, index })),
+    );
+    restoreRunModel(run, redo.model);
+    this.partialPlan = redo.plan;
+    this.partialInsertedPtrs = redo.inserted;
+    this.originalObjects = redo.originals;
+    run.text = this.nextText;
+    run.dirty = true;
+    page.markDirty();
+    page.markNeedsGenerate();
+    return true;
+  }
+
+  // Removed objects are only detached, never destroyed, so the originals return with their own fonts and glyphs, which a re-emit cannot rebuild for a Type 3 or subset face.
+  private putOriginalObjectsBack(m: WrappedPdfiumModule, page: Page): boolean {
+    const originals = this.originalObjects;
+    this.originalObjects = null;
+    if (!originals) return false;
+    this.revertedExactly = true;
+    for (const ptr of originals.detached)
+      m.FPDFPage_InsertObject(page.pagePtr, ptr);
+    for (const [ptr, matrix] of originals.matrices) writeMatrix(m, ptr, matrix);
+    restoreContentOrder(
+      m,
+      page.pagePtr,
+      [...originals.order].map(([ptr, index]) => ({ ptr, index })),
+    );
+    return true;
+  }
+
+  /** True when revert puts back the very objects apply took off the page. */
+  private revertsExactly(): boolean {
+    return (
+      this.originalObjects !== null ||
+      (this.lineEdit !== null &&
+        this.lineEdit.removed.every((rem) => rem.detached !== null))
+    );
+  }
+
+  // Exactly one revert strategy member may be set per apply. Enforced only by
+  // guard ordering, so fail fast in dev if two paths ran or a member leaked.
+  private assertSingleRevertPath(): void {
+    const set =
+      (this.bidiInsertedPtrs !== null ? 1 : 0) +
+      (this.lineEdit !== null ? 1 : 0) +
+      (this.paragraphPlan !== null ? 1 : 0) +
+      (this.partialPlan !== null ? 1 : 0) +
+      (this.overlaid ? 1 : 0);
+    if (set > 1) {
+      console.error(
+        `EditTextCommand revert: ${set} strategy members set, expected <=1`,
+      );
+    }
+  }
+
+  revert(doc: EditorDocument): void {
+    this.undoPushes(doc);
+    this.revertEdit(doc);
+    const run = doc.page(this.pageIndex).findRun(this.runId);
+    if (run && this.softBefore) setSoftStarts(run, this.softBefore);
+  }
+
+  private revertEdit(doc: EditorDocument): void {
+    const page = doc.page(this.pageIndex);
+    const run = page.findRun(this.runId);
+    if (!run || this.prevText === null) return;
+    if (this.scanEdited && run.scanEdit) {
+      renderScanEdit(doc, page, run, run.scanEdit, this.prevText);
+      if (this.scanBounds) run.bounds = { ...this.scanBounds.before };
+      return;
+    }
+    this.assertSingleRevertPath();
+    const m = doc.module;
+
+    if (this.bidiInsertedPtrs) {
+      for (const ptr of this.bidiInsertedPtrs)
+        m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+      this.bidiInsertedPtrs = null;
+      if (this.editSnapshot && this.putOriginalObjectsBack(m, page))
+        restoreRunModel(run, this.editSnapshot);
+      run.text = this.prevText;
+      run.dirty = true;
+      page.markDirty();
+      page.markNeedsGenerate();
+      return;
+    }
+
+    // Paragraph line add/remove revert: move matched lines back to their
+    // original baselines, drop the freshly-emitted new/changed lines.
+    if (this.lineEdit) {
+      for (let i = this.lineEdit.moves.length - 1; i >= 0; i--) {
+        const mv = this.lineEdit.moves[i];
+        try {
+          transformObject(m, mv.ptr, 1, 0, 0, 1, 0, -mv.dy);
+        } catch {
+          /* best-effort */
+        }
+      }
+      for (const ptr of this.lineEdit.createdPtrs) {
+        if (!ptr) continue;
+        try {
+          m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+        } catch {
+          /* best-effort */
+        }
+      }
+      restoreRunModel(run, this.lineEdit.prev);
+      const putBack = this.lineEdit.removed.flatMap(
+        (rem) => rem.detached ?? [],
+      );
+      for (const { ptr } of putBack) m.FPDFPage_InsertObject(page.pagePtr, ptr);
+      if (putBack.length > 0) restoreContentOrder(m, page.pagePtr, putBack);
+      const lost = this.lineEdit.removed.filter((rem) => !rem.detached);
+      this.revertedExactly = lost.length === 0;
+      if (lost.length > 0) {
+        const fallbackFamily = fallbackFamilyFor(this.prevFontId ?? run.fontId);
+        for (const rem of lost) {
+          const ptrs = emitTextLine({
+            doc,
+            page,
+            text: rem.text,
+            x: rem.x,
+            y: rem.y,
+            fontSize: rem.fontSize,
+            fill: run.fill,
+            ...inkFromRun(run),
+            tags: rem.tags,
+            originalFontPtr: 0,
+            charSpacingPt: run.charSpacingPt,
+            fallbackFamily,
+          });
+          patchSlotPtrsByBaseline(m, run, rem.y, ptrs, rem.text);
+        }
+        reflattenLeafArrays(run);
+      }
+      run.text = this.prevText;
+      run.dirty = true;
+      this.lineEdit = null;
+      page.markDirty();
+      page.markNeedsGenerate();
+      return;
+    }
+
+    // Paragraph-aware partial revert: remove every per-slot insert ptr, re-emit
+    // fallback chunks at each removed sub-run's original spot.
+    if (this.paragraphPlan) {
+      // Remove the chunks the forward apply inserted.
+      for (const ptr of this.paragraphInsertedPtrs) {
+        if (!ptr) continue;
+        try {
+          m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+        } catch {
+          /* best-effort */
+        }
+      }
+      this.paragraphInsertedPtrs = [];
+      if (this.editSnapshot && this.putOriginalObjectsBack(m, page)) {
+        for (const entry of this.paragraphPlan.perSlot) {
+          const prevSlot = this.prevParagraphSlots[entry.slotIdx];
+          for (const op of entry.plan?.ops ?? [])
+            if (op.type === "modify" && op.subRunIdx !== undefined)
+              setObjText(
+                doc,
+                page,
+                prevSlot.mergedFromPtrs[op.subRunIdx],
+                prevSlot.mergedFromTexts[op.subRunIdx] ?? "",
+              );
+        }
+        restoreRunModel(run, this.editSnapshot);
+        run.text = this.prevText;
+        run.dirty = true;
+        this.paragraphPlan = null;
+        page.markDirty();
+        page.markNeedsGenerate();
+        return;
+      }
+      // Pure-insert edit (no original object freed/mutated): every original
+      // object is still alive, so restore the exact pre-edit model.
+      const pureInsert = this.paragraphPlan.perSlot.every(
+        (e) => e.plan !== null && planIsPureInsert(e.plan),
+      );
+      if (pureInsert && this.editSnapshot) {
+        restoreRunModel(run, this.editSnapshot);
+        run.text = this.prevText;
+        run.dirty = true;
+        this.paragraphPlan = null;
+        page.markDirty();
+        page.markNeedsGenerate();
+        return;
+      }
+      const revertFallback = fallbackFamilyFor(this.prevFontId ?? run.fontId);
+      // Rebuild every line from the pre-edit slots: kept/modified sub-runs keep
+      // their live original object.
+      const lines: RebuildLine[] = [];
+      for (let s = 0; s < this.prevParagraphSlots.length; s++) {
+        const prevSlot = this.prevParagraphSlots[s];
+        const entry = this.paragraphPlan.perSlot.find((e) => e.slotIdx === s);
+        if (entry && entry.plan) {
+          for (const op of entry.plan.ops) {
+            if (op.type === "modify" && op.subRunIdx !== undefined) {
+              setObjText(
+                doc,
+                page,
+                prevSlot.mergedFromPtrs[op.subRunIdx],
+                prevSlot.mergedFromTexts[op.subRunIdx] ?? "",
+              );
+            }
+          }
+        }
+        // A fresh-emit slot (plan === null) had ALL its original objects
+        // removed during apply, so re-emit every one of them on revert.
+        const removed = new Set(
+          entry
+            ? entry.plan
+              ? entry.plan.removePtrs.map((r) => r.ptr)
+              : prevSlot.mergedFromPtrs
+            : [],
+        );
+        lines.push({
+          baselineY: prevSlot.baselineY,
+          fontSize: prevSlot.fontSize,
+          subRuns: prevSlot.mergedFromPtrs.map((ptr, i) => {
+            const text = prevSlot.mergedFromTexts[i] ?? "";
+            const start =
+              prevSlot.startChar + (prevSlot.mergedFromCharStarts[i] ?? 0);
+            return {
+              ptr,
+              text,
+              tags: this.prevTagsOf(run, start, start + text.length),
+              x: prevSlot.mergedFromBounds[i]?.x ?? prevSlot.matrixE,
+              removed: removed.has(ptr),
+            };
+          }),
+        });
+      }
+      this.rebuildAsOverlayModel(doc, page, run, lines, revertFallback);
+      run.text = this.prevText;
+      run.dirty = true;
+      this.paragraphPlan = null;
+      page.markDirty();
+      page.markNeedsGenerate();
+      return;
+    }
+
+    // Partial-edit fast path revert: the removed sub-objects are gone from
+    // PDFium permanently.
+    if (this.partialPlan) {
+      const inserted = withGained(
+        m,
+        page,
+        run,
+        this.partialInsertedPtrs,
+        this.editSnapshot,
+        new Set(this.partialPlan.removePtrs.map((r) => r.ptr)),
+      );
+      const redo = this.capturePartialRedo(m, page, run, inserted);
+      for (const ptr of inserted) {
+        if (!ptr) continue;
+        try {
+          m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+        } catch {
+          /* best-effort */
+        }
+      }
+      this.partialInsertedPtrs = [];
+      // In-place "modify" sub-runs kept their object (and font); restore
+      // their original text so undo shows the pre-edit characters.
+      for (const op of this.partialPlan.ops) {
+        if (op.type === "modify" && op.subRunIdx !== undefined) {
+          setObjText(
+            doc,
+            page,
+            this.prevMergedFromPtrs[op.subRunIdx],
+            this.prevMergedFromTexts[op.subRunIdx] ?? "",
+          );
+        }
+      }
+      // No original objects were destroyed: restore the EXACT pre-edit model so
+      // undo keeps the original embedded fonts AND redo re-engages the.
+      if (this.editSnapshot && this.putOriginalObjectsBack(m, page)) {
+        restoreRunModel(run, this.editSnapshot);
+        run.text = this.prevText;
+        run.dirty = true;
+        this.partialPlan = null;
+        this.partialRedo = redo;
+        page.markDirty();
+        page.markNeedsGenerate();
+        return;
+      }
+      const revertFallback = fallbackFamilyFor(this.prevFontId ?? run.fontId);
+      const removed = new Set(this.partialPlan.removePtrs.map((r) => r.ptr));
+      const snap = this.editSnapshot;
+      const replacements =
+        snap && run.containerPtr === 0
+          ? revertPartialEditPlan(
+              doc,
+              page,
+              run,
+              this.partialPlan,
+              {
+                fonts: this.prevMergedFromFonts,
+                fills: this.prevMergedFromFills,
+                charStarts: snap.mergedFromCharStarts,
+                baselineY: snap.matrixF,
+                fontSubset: snap.fontSubset,
+              },
+              (start, end) => this.prevTagsOf(run, start, end),
+              revertFallback,
+            )
+          : null;
+      if (snap && replacements) {
+        restoreRunModelReplacing(run, snap, replacements);
+        run.text = this.prevText;
+        run.dirty = true;
+        this.partialPlan = null;
+        page.markDirty();
+        page.markNeedsGenerate();
+        return;
+      }
+      this.rebuildAsOverlayModel(
+        doc,
+        page,
+        run,
+        [
+          {
+            baselineY: run.matrix.f,
+            fontSize: run.fontSize,
+            subRuns: this.prevMergedFromPtrs.map((ptr, i) => {
+              const text = this.prevMergedFromTexts[i] ?? "";
+              const start = this.editSnapshot?.mergedFromCharStarts[i] ?? 0;
+              return {
+                ptr,
+                text,
+                tags: this.prevTagsOf(run, start, start + text.length),
+                x: this.prevMergedFromBounds[i]?.x ?? run.matrix.e,
+                removed: removed.has(ptr),
+              };
+            }),
+          },
+        ],
+        revertFallback,
+      );
+      run.text = this.prevText;
+      run.dirty = true;
+      this.partialPlan = null;
+      page.markDirty();
+      page.markNeedsGenerate();
+      return;
+    }
+
+    if (!this.overlaid) {
+      run.text = this.prevText;
+      run.dirty = true;
+      page.markDirty();
+      PdfiumTextWriter.commitRunText(doc, page, run);
+      return;
+    }
+
+    for (const ptr of this.createdPtrs) {
+      if (!ptr) continue;
+      try {
+        m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+      } catch {
+        /* best-effort */
+      }
+    }
+    this.coverRectPtr = 0;
+    this.newTextPtr = 0;
+    this.createdPtrs = [];
+    if (this.scanSource) {
+      run.fill = this.scanSource.fill;
+      run.fontSize = this.scanSource.fontSize;
+      run.renderMode = RENDER_MODE_INVISIBLE;
+      this.scanSource = null;
+    }
+
+    // Everything else the run still owns goes too, because the re-emit below
+    // rebuilds the run whole.
+    //
+    // A typed burst coalesces into ONE undo step covering several commands.
+    // The first revert removes its own createdPtrs and re-emits; the second
+    // then finds ITS createdPtrs already gone, removes nothing, and re-emits
+    // again - leaving the first revert's objects orphaned on the page. Two
+    // characters typed mid-word undid to "Heading in a Qbigger bigger
+    // sizesize": doubled, overlapping glyphs that read as a changed font.
+    for (const ptr of run.paragraphLeafPtrs) {
+      if (!ptr) continue;
+      try {
+        m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+      } catch {
+        /* best-effort - the ptr may already be gone */
+      }
+    }
+
+    if (this.editSnapshot && this.putOriginalObjectsBack(m, page)) {
+      restoreRunModel(run, this.editSnapshot);
+      run.text = this.prevText;
+      run.dirty = true;
+      this.overlaid = false;
+      page.markDirty();
+      page.markNeedsGenerate();
+      return;
+    }
+
+    // PDFium has no insert-into-form-xobject API, so the truly-original
+    // pointers (if they lived in a form) are gone forever.
+    const revertFallback = fallbackFamilyFor(this.prevFontId ?? "");
+    const lineAnchorPtrs: number[] = [];
+    const allRestoredPtrs: number[] = [];
+    for (const line of this.revertLines) {
+      const ptrs = emitTextLine({
+        doc,
+        page,
+        text: line.text,
+        x: line.x,
+        y: line.y,
+        fontSize: line.fontSize,
+        fill: line.fill,
+        // The run's own font, not a base-14 stand-in: re-emitting an embedded
+        // face as Helvetica is what made undo look like it changed the font.
+        originalFontPtr: this.prevFontPtr,
+        charSpacingPt: line.charSpacingPt,
+        fallbackFamily: revertFallback,
+        // Keep the run's original orientation - without this, undoing an
+        // edit on a rotated run scattered its text axis-aligned.
+        rotation: this.revertRotation ?? undefined,
+        // ...and its ink. applyInkState writes the mode unconditionally, so
+        // omitting this forced every restored object back to fill: undo on
+        // invisible OCR text stamped visible glyphs over the scan.
+        ...inkFromRun(run),
+        tags: line.tags,
+      });
+      if (ptrs.length === 0) continue;
+      lineAnchorPtrs.push(ptrs[0]);
+      allRestoredPtrs.push(...ptrs);
+    }
+
+    run.pdfiumObjPtr = lineAnchorPtrs[0] ?? this.prevObjPtr;
+    // Only claim the fallback when we actually emitted in it.
+    if (this.prevFontPtr === 0) {
+      run.fontId = fallbackFontIdFor(revertFallback);
+      run.fontSubset = false;
+    } else if (this.prevFontId !== null) {
+      run.fontId = this.prevFontId;
+    }
+    run.text = this.prevText;
+    run.mergedFromPtrs = [];
+    run.paragraphMemberPtrs = lineAnchorPtrs;
+    run.paragraphMemberContainers = lineAnchorPtrs.map(() => 0);
+    run.paragraphMemberFs = this.revertLines.map((l) => l.y);
+    run.paragraphLeafPtrs = allRestoredPtrs;
+    run.paragraphLeafContainers = allRestoredPtrs.map(() => 0);
+    run.containerPtr = 0;
+    if (this.editSnapshot) run.bounds = { ...this.editSnapshot.bounds };
+    run.dirty = true;
+    this.overlaid = false;
+    page.markDirty();
+    page.markNeedsGenerate();
+  }
+
+  // Apply a paragraph edit that changed the LINE COUNT (Enter typed or a
+  // newline deleted) where slots map 1:1 to lines.
+  private applyParagraphLineEdit(
+    doc: EditorDocument,
+    page: Page,
+    run: TextRun,
+    prevLines: string[],
+    nextLines: string[],
+    prevTags: TextTags,
+    nextTags: TextTags,
+  ): void {
+    const m = doc.module;
+    const slots = run.paragraphLineSlots;
+    const lineHeight =
+      run.paragraphLineHeight > 0
+        ? run.paragraphLineHeight
+        : run.fontSize * 1.2;
+    const topBaseline = slots[0]?.baselineY ?? run.matrix.f;
+    const leftX = slots[0]?.matrixE ?? run.matrix.e;
+    const fallbackFamily = fallbackFamilyFor(this.prevFontId ?? run.fontId);
+    // Re-emitted lines keep the run's embedded face for the words it draws:
+    // emitting at base-14 turned the whole line a different typeface. Letters
+    // typed earlier may have fallen back because the subset lacks them, and
+    // the subset still maps their codes with no outline, so those words keep
+    // the fallback. Read before the loop starts mutating.
+    const memberPtrs = collectMemberPtrs(run);
+    const memberTexts =
+      run.mergedFromTexts.length === memberPtrs.length
+        ? run.mergedFromTexts
+        : memberPtrs.map(() => run.text);
+    const reuseFontPtr =
+      run.containerPtr === 0
+        ? bestFontPtrForText(m, memberPtrs, memberTexts, run.text) ||
+          (run.pdfiumObjPtr ? safeGetFont(m, run.pdfiumObjPtr) : 0)
+        : 0;
+    const match = lineLCS(prevLines, nextLines);
+    const prevText = prevLines.join("\n");
+    const nextText = nextLines.join("\n");
+    const pieces = piecesFromObjects(m, page.pagePtr, memberPtrs, prevText);
+    const spans = pieces
+      ? editedFontSpans(doc, page, pieces, prevText, nextText)
+      : undefined;
+    const spansOfLine = spans && spansByLine(spans, nextText);
+
+    this.lineEdit = {
+      moves: [],
+      createdPtrs: [],
+      removed: [],
+      prev: snapshotRunModel(run),
+    };
+
+    const newSlots: ParagraphLineSlot[] = [];
+    const newLeaf: number[] = [];
+    const newLeafContainers: number[] = [];
+    const newMemberPtrs: number[] = [];
+    const newMemberFs: number[] = [];
+    const usedPrev = new Set<number>();
+    let cursor = 0;
+    const baselines = keptLeadingBaselines(
+      nextLines.length,
+      match,
+      slots,
+      topBaseline,
+      lineHeight,
+    );
+    for (let i = 0; i < nextLines.length; i++) {
+      const text = nextLines[i];
+      const y = baselines[i];
+      const prevIdx = match.get(i);
+      let slot: ParagraphLineSlot;
+      if (prevIdx !== undefined && slots[prevIdx]) {
+        // Unchanged line: keep its objects, translate to the new baseline.
+        usedPrev.add(prevIdx);
+        const src = slots[prevIdx];
+        const dy = y - src.baselineY;
+        if (Math.abs(dy) > 0.001) {
+          for (const ptr of src.mergedFromPtrs) {
+            if (!ptr) continue;
+            try {
+              transformObject(m, ptr, 1, 0, 0, 1, 0, dy);
+            } catch {
+              /* best-effort - stale ptr */
+            }
+            this.lineEdit.moves.push({ ptr, dy });
+          }
+        }
+        slot = cloneSlot(src);
+        slot.baselineY = y;
+        for (const ptr of src.mergedFromPtrs) {
+          if (ptr) {
+            newLeaf.push(ptr);
+            newLeafContainers.push(src.containerPtr);
+          }
+        }
+        newMemberPtrs.push(src.mergedFromPtrs[0] ?? 0);
+        newMemberFs.push(y);
+      } else if (text.length === 0) {
+        // Seeded from the line this one was split off, so the blank line keeps
+        // the paragraph's font instead of being stamped base-14 before the
+        // user has typed a character into it.
+        slot = emptySlot(
+          y,
+          leftX,
+          run,
+          fallbackFamily,
+          newSlots[newSlots.length - 1] ?? slots[0],
+        );
+        newMemberPtrs.push(0);
+        newMemberFs.push(y);
+      } else {
+        // New / changed line: re-emit it reusing the run's embedded face.
+        // Keep the line's OWN left edge - a table row grouped as a paragraph
+        // has a different x per line, and slot 0's x drops it into the
+        // neighbouring column.
+        const lineX = slots[i]?.matrixE ?? leftX;
+        const lineSpans = spansOfLine?.[i];
+        const emittedTexts: string[] = [];
+        const ptrs = emitTextLine({
+          outTexts: emittedTexts,
+          doc,
+          page,
+          text,
+          x: lineX,
+          y,
+          fontSize: run.fontSize,
+          fill: lineSpans?.[0]?.fill ?? run.fill,
+          ...inkFromRun(run),
+          tags: sliceTags(nextTags, cursor, cursor + text.length),
+          fontSpans: lineSpans,
+          originalFontPtr: lineSpans?.[0]?.fontPtr || reuseFontPtr,
+          originalFontSubset: run.fontSubset,
+          originalFontForCoveredWords: reuseFontPtr !== 0,
+          charSpacingPt: run.charSpacingPt,
+          fallbackFamily,
+        });
+        this.lineEdit.createdPtrs.push(...ptrs);
+        for (const p of ptrs) {
+          newLeaf.push(p);
+          newLeafContainers.push(0);
+        }
+        newMemberPtrs.push(ptrs[0] ?? 0);
+        newMemberFs.push(y);
+        slot = buildSlotForLine(
+          m,
+          ptrs,
+          text,
+          y,
+          lineX,
+          run,
+          reuseFontPtr ? run.fontId : fallbackFontIdFor(fallbackFamily),
+          emittedTexts,
+        );
+      }
+      slot.startChar = cursor;
+      slot.endChar = cursor + text.length;
+      cursor += text.length + 1;
+      newSlots.push(slot);
+    }
+
+    // Remove objects of any prev line no next line reused.
+    const dropped = slots.filter((_, j) => !usedPrev.has(j));
+    // Read before any is removed, so every index is a position in the same content.
+    const order = contentIndices(
+      m,
+      page.pagePtr,
+      dropped.flatMap((src) => src.mergedFromPtrs.filter(Boolean)),
+    );
+    for (let j = 0; j < slots.length; j++) {
+      if (usedPrev.has(j)) continue;
+      const src = slots[j];
+      const ptrs = src.mergedFromPtrs.filter(Boolean);
+      const onPage =
+        !src.containerPtr &&
+        !run.containerPtr &&
+        ptrs.length > 0 &&
+        ptrs.every((ptr) => order.has(ptr));
+      if (prevLines[j]) {
+        this.lineEdit.removed.push({
+          text: prevLines[j],
+          tags: sliceTags(prevTags, src.startChar, src.endChar),
+          x: src.mergedFromBounds[0]?.x ?? src.matrixE,
+          y: src.baselineY,
+          fontSize: src.fontSize,
+          detached: onPage
+            ? ptrs.map((ptr) => ({ ptr, index: order.get(ptr)! }))
+            : null,
+        });
+      }
+      for (const ptr of src.mergedFromPtrs) {
+        if (!ptr) continue;
+        try {
+          m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+
+    // Write the model, PRESERVING matched lines' original objects.
+    run.paragraphLineSlots = newSlots;
+    run.paragraphLeafPtrs = newLeaf;
+    run.paragraphLeafContainers = newLeafContainers;
+    run.paragraphMemberPtrs = newMemberPtrs;
+    run.paragraphMemberContainers = newMemberPtrs.map(() => 0);
+    run.paragraphMemberFs = newMemberFs;
+    run.paragraphLineHeight = lineHeight;
+    run.matrix = { ...run.matrix, e: leftX, f: topBaseline };
+    if (newLeaf[0]) run.pdfiumObjPtr = newLeaf[0];
+    const s0 = newSlots[0];
+    if (s0) {
+      run.mergedFromPtrs = [...s0.mergedFromPtrs];
+      run.mergedFromTexts = [...s0.mergedFromTexts];
+      run.mergedFromBounds = s0.mergedFromBounds.map((b) => ({ ...b }));
+      run.mergedFromCharStarts = [...s0.mergedFromCharStarts];
+    }
+    let maxRight = leftX;
+    for (const s of newSlots) {
+      for (const b of s.mergedFromBounds) {
+        if (b.right > maxRight) maxRight = b.right;
+      }
+    }
+    run.bounds = {
+      x: leftX,
+      y: topBaseline - (newSlots.length - 1) * lineHeight - run.fontSize * 0.25,
+      width: Math.max(0, maxRight - leftX),
+      height: newSlots.length * lineHeight + run.fontSize * 0.25,
+    };
+  }
+
+  /** Apply a paragraph edit that APPENDED lines (Enter + text at the end). */
+  private applyParagraphAppend(
+    doc: EditorDocument,
+    page: Page,
+    run: TextRun,
+    nextTags: TextTags,
+  ): void {
+    const m = doc.module;
+    const slots = run.paragraphLineSlots;
+    const lineHeight =
+      run.paragraphLineHeight > 0
+        ? run.paragraphLineHeight
+        : run.fontSize * 1.2;
+    const leftX = slots[0]?.matrixE ?? run.matrix.e;
+    const bottomBaseline = Math.min(
+      run.matrix.f,
+      ...slots.map((s) => s.baselineY),
+    );
+    const fallbackFamily = fallbackFamilyFor(this.prevFontId ?? run.fontId);
+
+    this.lineEdit = {
+      moves: [],
+      createdPtrs: [],
+      removed: [],
+      prev: snapshotRunModel(run),
+    };
+
+    // The caller only routes here when the suffix is a pure newline-prefixed
+    // append, so split keeps a leading "" entry for that first break, skipped.
+    const appendedLines = this.nextText
+      .slice(this.prevText!.length)
+      .split(/\r?\n/);
+    const newSlots: ParagraphLineSlot[] = [];
+    const newLeaf: number[] = [];
+    const newMemberPtrs: number[] = [];
+    const newMemberFs: number[] = [];
+    let cursor = this.prevText!.length;
+    let below = 0;
+    for (let li = 1; li < appendedLines.length; li++) {
+      const text = appendedLines[li];
+      cursor += 1; // the "\n" separator before this line
+      below += 1;
+      const y = bottomBaseline - below * lineHeight;
+      let slot: ParagraphLineSlot;
+      if (text.length === 0) {
+        slot = emptySlot(y, leftX, run, fallbackFamily);
+        newMemberPtrs.push(0);
+        newMemberFs.push(y);
+      } else {
+        const emittedTexts: string[] = [];
+        const ptrs = emitTextLine({
+          doc,
+          page,
+          text,
+          x: leftX,
+          y,
+          fontSize: run.fontSize,
+          fill: run.fill,
+          ...inkFromRun(run),
+          tags: sliceTags(nextTags, cursor, cursor + text.length),
+          originalFontPtr: 0,
+          charSpacingPt: run.charSpacingPt,
+          fallbackFamily,
+          outTexts: emittedTexts,
+        });
+        this.lineEdit.createdPtrs.push(...ptrs);
+        newLeaf.push(...ptrs);
+        newMemberPtrs.push(ptrs[0] ?? 0);
+        newMemberFs.push(y);
+        slot = buildSlotForLine(
+          m,
+          ptrs,
+          text,
+          y,
+          leftX,
+          run,
+          fallbackFontIdFor(fallbackFamily),
+          emittedTexts,
+        );
+      }
+      slot.startChar = cursor;
+      slot.endChar = cursor + text.length;
+      cursor += text.length;
+      newSlots.push(slot);
+    }
+
+    // Preserve EVERY original object (fonts + layout intact); only append the
+    // new lines. ReflowWrapCommand re-lines the whole paragraph on blur.
+    run.paragraphLineSlots = [...slots.map(cloneSlot), ...newSlots];
+    run.paragraphLeafPtrs = [...run.paragraphLeafPtrs, ...newLeaf];
+    run.paragraphLeafContainers = [
+      ...run.paragraphLeafContainers,
+      ...newLeaf.map(() => 0),
+    ];
+    run.paragraphMemberPtrs = [...run.paragraphMemberPtrs, ...newMemberPtrs];
+    run.paragraphMemberContainers = [
+      ...run.paragraphMemberContainers,
+      ...newMemberPtrs.map(() => 0),
+    ];
+    run.paragraphMemberFs = [...run.paragraphMemberFs, ...newMemberFs];
+    run.paragraphLineHeight = lineHeight;
+    run.bounds = {
+      ...run.bounds,
+      y: bottomBaseline - below * lineHeight - run.fontSize * 0.25,
+      height: run.bounds.height + below * lineHeight,
+    };
+  }
+
+  // After an undo of a partial/paragraph edit, re-register the run's live
+  // PDFium objects as a flat overlay model.
+  private rebuildAsOverlayModel(
+    doc: EditorDocument,
+    page: Page,
+    run: TextRun,
+    lines: RebuildLine[],
+    fallbackFamily: string,
+  ): void {
+    const m = doc.module;
+    // Drop everything the run still owns that this rebuild is not keeping.
+    // A coalesced burst reverts several commands in a row, each re-emitting
+    // the whole run, so the earlier reverts' objects would stay painted under
+    // the later ones (5 objects -> 15 -> 48 on four characters).
+    //
+    // Both lists: the paragraph path tracks paragraphLeafPtrs, the partial
+    // (split) path repoints mergedFromPtrs at what it emitted.
+    const keep = new Set<number>();
+    for (const line of lines) {
+      for (const sr of line.subRuns) {
+        if (!sr.removed && sr.ptr) keep.add(sr.ptr);
+      }
+    }
+    for (const ptr of [...run.paragraphLeafPtrs, ...run.mergedFromPtrs]) {
+      if (!ptr || keep.has(ptr)) continue;
+      try {
+        m.FPDFPage_RemoveObject(page.pagePtr, ptr);
+      } catch {
+        /* best-effort - the ptr may already be gone */
+      }
+    }
+
+    const orderedLive: number[] = [];
+    const lineAnchors: number[] = [];
+    const anchorFs: number[] = [];
+    for (const line of lines) {
+      const slotLive: number[] = [];
+      for (const sr of line.subRuns) {
+        if (sr.removed) {
+          if (!sr.text) continue;
+          const ptrs = emitTextLine({
+            doc,
+            page,
+            text: sr.text,
+            x: sr.x,
+            y: line.baselineY,
+            fontSize: line.fontSize,
+            fill: run.fill,
+            ...inkFromRun(run),
+            tags: sr.tags,
+            originalFontPtr: 0,
+            charSpacingPt: run.charSpacingPt,
+            fallbackFamily,
+          });
+          slotLive.push(...ptrs);
+        } else if (sr.ptr) {
+          // Move what the edit shifted back beside the redrawn pieces.
+          if (run.containerPtr === 0) moveObjectLeftEdgeTo(m, sr.ptr, sr.x);
+          slotLive.push(sr.ptr);
+        }
+      }
+      if (slotLive.length === 0) continue;
+      lineAnchors.push(slotLive[0]);
+      anchorFs.push(line.baselineY);
+      orderedLive.push(...slotLive);
+    }
+    run.mergedFromPtrs = [];
+    run.mergedFromTexts = [];
+    run.mergedFromBounds = [];
+    run.mergedFromCharStarts = [];
+    run.paragraphLineSlots = [];
+    run.paragraphLeafPtrs = orderedLive;
+    run.paragraphLeafContainers = orderedLive.map(() => 0);
+    run.paragraphMemberPtrs = lineAnchors;
+    run.paragraphMemberContainers = lineAnchors.map(() => 0);
+    run.paragraphMemberFs = anchorFs;
+    if (orderedLive.length > 0) run.pdfiumObjPtr = orderedLive[0];
+  }
+
+  describe(): string {
+    return i18n.t("pdfTextEditor.commands.typeInto", "Type into {{run}}", {
+      run: this.runId,
+    });
+  }
+
+  /** Undo or redo a burst as one edit: each step's undo names objects a later step replaced. */
+  moveGroup(
+    doc: EditorDocument,
+    group: readonly Command[],
+    phase: "apply" | "revert",
+  ): boolean {
+    if (group.length < 2) return false;
+    const edits: EditTextCommand[] = [];
+    for (const cmd of group) {
+      if (
+        !(cmd instanceof EditTextCommand) ||
+        cmd.pageIndex !== this.pageIndex ||
+        cmd.runId !== this.runId ||
+        cmd.scanEdited
+      )
+        return false;
+      edits.push(cmd);
+    }
+    // Every step puts back exactly the objects the step before it drew, so stepping through keeps each piece's own font and glyphs.
+    if (
+      phase === "revert"
+        ? edits.every((edit) => edit.revertsExactly())
+        : edits.every((edit) => edit.revertedExactly)
+    )
+      return false;
+    const first = edits[0].prevText;
+    const run = doc.page(this.pageIndex).findRun(this.runId);
+    if (first === null || !run || isScanRun(run)) return false;
+    // A later step may have redrawn the run in a fallback; undo goes back to the face the burst started from.
+    const { startFont } = edits[0];
+    const firstFont =
+      startFont && (edits[0].overlaid || run.fontId !== startFont.id)
+        ? startFont
+        : null;
+    const move = new EditTextCommand({
+      pageIndex: this.pageIndex,
+      runId: this.runId,
+      nextText: phase === "revert" ? first : this.nextText,
+      nextTags: phase === "revert" ? edits[0].prevTags : null,
+      nextFont: phase === "revert" ? firstFont : null,
+      pushesBelow: false,
+    });
+    const reversed = [...edits].reverse();
+    if (phase === "revert") for (const edit of reversed) edit.undoPushes(doc);
+    const before = new Set(collectMemberPtrs(run));
+    // Only while the run is still made of exactly what the last replay drew: after any other step, that step may hold these objects.
+    const replaced = this.replayDrawn.every((ptr) => before.has(ptr))
+      ? this.replayDrawn
+      : [];
+    try {
+      move.apply(doc);
+      if (phase === "revert") edits[0].restoreLayout(doc, run);
+    } catch (err) {
+      try {
+        move.revert(doc);
+        if (phase === "revert") for (const edit of edits) edit.redoPushes(doc);
+      } catch {
+        throw err;
+      }
+      throw new RolledBackError(err);
+    }
+    if (phase === "apply") for (const edit of edits) edit.redoPushes(doc);
+    const soft = phase === "revert" ? edits[0].softBefore : this.softAfter;
+    if (soft) setSoftStarts(run, soft);
+    const after = new Set(collectMemberPtrs(run));
+    // The replay command is thrown away, and with it the only record of the objects it took off the page.
+    for (const ptr of replaced)
+      if (ptr && !after.has(ptr)) doc.module.FPDFPageObj_Destroy(ptr);
+    this.replayDrawn = [...after].filter((ptr) => ptr && !before.has(ptr));
+    return true;
+  }
+
+  // The move plans from the burst's shifted pieces; a piece starting where one of this edit's did goes back there, and the pieces after it with it.
+  private restoreLayout(doc: EditorDocument, run: TextRun): void {
+    const snap = this.editSnapshot;
+    if (!snap || run.containerPtr !== 0 || run.text !== snap.text) return;
+    let shift = 0;
+    run.mergedFromBounds = run.mergedFromBounds.map((bounds, i) => {
+      const was = snap.mergedFromCharStarts.indexOf(
+        run.mergedFromCharStarts[i],
+      );
+      const x = snap.mergedFromBounds[was]?.x;
+      if (x !== undefined) shift = x - bounds.x;
+      const ptr = run.mergedFromPtrs[i];
+      if (ptr && shift) moveObjectLeftEdgeTo(doc.module, ptr, bounds.x + shift);
+      return { x: bounds.x + shift, right: bounds.right + shift };
+    });
+    run.bounds = { ...snap.bounds };
+    run.matrix = { ...run.matrix, e: snap.matrixE };
+  }
+
+  repaintArea(doc: EditorDocument): PageRepaintArea | null {
+    if (this.pushes?.length) return null;
+    const run = doc.page(this.pageIndex).findRun(this.runId);
+    // Turned text is typed along its own slant, out of its upright box.
+    if (
+      !run ||
+      Math.abs(run.matrix.b) > UPRIGHT_TOLERANCE ||
+      Math.abs(run.matrix.c) > UPRIGHT_TOLERANCE
+    )
+      return null;
+    // Covers what a scanned edit paints around its words: covers, softened edges, i-dots.
+    const margin = Math.max(
+      MIN_REPAINT_MARGIN_PT,
+      run.fontSize * REPAINT_MARGIN_PER_FONT_SIZE,
+    );
+    const { x, y, width, height } = run.bounds;
+    const scan = isScanRun(run);
+    // A scanned edit moves the scan's own words, which can land past the run's box.
+    const [left, right] = scan
+      ? [-PAGE_SPAN_PT, PAGE_SPAN_PT]
+      : [x - margin, x + width + margin];
+    // Lines a scanned edit adds or drops sit below the run's one-line box.
+    const drawn =
+      scan && run.scanEdit
+        ? measureObjBoundsPt(doc.module, [
+            ...run.scanEdit.created,
+            ...run.scanEdit.textPtrs,
+          ])
+        : null;
+    const bottom = Math.min(y, drawn?.bottom ?? y) - margin;
+    const top = Math.max(y + height, drawn?.top ?? y + height) + margin;
+    return {
+      pageIndex: this.pageIndex,
+      area: { x: left, y: bottom, width: right - left, height: top - bottom },
+    };
+  }
+
+  /** Consecutive typing on the SAME run coalesces into one undo step; an `explicit` edit (a resize) is always its own. */
+  coalesceKey(): string | null {
+    if (this.explicit) return null;
+    return `edit-text:${this.pageIndex}:${this.runId}`;
+  }
+
+  supersedes(adjacent: Command): boolean {
+    return (
+      adjacent instanceof EditTextCommand &&
+      this.scanEdited &&
+      !this.scanRefused &&
+      adjacent.scanEdited &&
+      adjacent.pageIndex === this.pageIndex &&
+      adjacent.runId === this.runId
+    );
+  }
+
+  /** The text this edit produced - lets the history compare adjacent edits. */
+  get resultText(): string {
+    return this.nextText;
+  }
+
+  // True when this edit's ENTIRE delta was one or more line breaks, i.e. the
+  // user pressed Enter and changed nothing else.
+  private isLineBreakOnlyInsertion(): boolean {
+    if (this.prevText === null) return false;
+    const inserted = insertedChunk(this.prevText, this.nextText);
+    return inserted !== null && /^(?:\r?\n)+$/.test(inserted);
+  }
+
+  // "Press Enter, then type" is ONE logical action, so it must cost one undo -
+  // which is what makes a bare line break merge forward here.
+  coalesceIgnoresTimeWindow(previous: Command | null): boolean {
+    if (!(previous instanceof EditTextCommand)) return false;
+    if (this.prevText === null) return false;
+    // Contiguity: this edit must start from exactly what that one produced.
+    if (previous.resultText !== this.prevText) return false;
+    return previous.isLineBreakOnlyInsertion();
+  }
+}
+
+function lineCount(text: string): number {
+  return text.split(/\r?\n/).length;
+}
+
+// The text `next` adds to `prev` when the change is a pure insertion at a
+// single point, or null when it is anything else.
+function insertedChunk(prev: string, next: string): string | null {
+  if (next.length <= prev.length) return null;
+  let head = 0;
+  while (head < prev.length && prev[head] === next[head]) head++;
+  let tail = 0;
+  while (
+    tail < prev.length - head &&
+    prev[prev.length - 1 - tail] === next[next.length - 1 - tail]
+  ) {
+    tail++;
+  }
+  // Everything outside the inserted chunk must be untouched original text.
+  if (head + tail !== prev.length) return null;
+  return next.slice(head, next.length - tail);
+}
+
+/** Keep a run's model width from claiming space past the page's right edge. */
+// What `prev` and `next` share before and after the one stretch that differs.
+function keptText(prev: string, next: string): string {
+  const { start, prevEnd } = diffSpan(prev, next);
+  return prev.slice(0, start) + prev.slice(prevEnd);
+}
+
+function clampWidthToPage(x: number, width: number, page: Page): number {
+  // x/width are RAW PDF space, so the right edge is the CropBox right edge in
+  // raw space.
+  const rawRightEdge = page.display.cropLeft + page.display.cropWidth;
+  const maxWidth = Math.max(0, rawRightEdge - x);
+  return Math.min(width, maxWidth);
+}
+
+function safeGetFont(m: WrappedPdfiumModule, objPtr: number): number {
+  const fn = (m as unknown as { FPDFTextObj_GetFont?: (p: number) => number })
+    .FPDFTextObj_GetFont;
+  if (!fn) return 0;
+  try {
+    return fn(objPtr);
+  } catch {
+    return 0;
+  }
+}
+
+function snapshotRevertLines(
+  run: TextRun,
+  prevText: string,
+  prevTags: TextTags,
+): RevertLine[] {
+  const lines = splitLines(prevText, prevTags);
+  const lineHeight =
+    run.paragraphLineHeight > 0 ? run.paragraphLineHeight : run.fontSize * 1.2;
+  return lines.map(({ text, tags }, idx) => ({
+    text,
+    tags,
+    x: run.matrix.e,
+    y: run.matrix.f - idx * lineHeight,
+    fill: { ...run.fill },
+    fontSize: Math.max(4, run.fontSize),
+    charSpacingPt: run.charSpacingPt,
+  }));
+}
+
+// The face and fill each stretch of an edited run's text came from; undefined for a run drawn in one of each.
+function editedFontSpans(
+  doc: EditorDocument,
+  page: Page,
+  pieces: Parameters<typeof sourceFontSpans>[1],
+  prevText: string,
+  nextText: string,
+): FontSpan[] | undefined {
+  const m = doc.module;
+  return sourceFontSpans(m, pieces, prevText, nextText, (font, text) =>
+    charcodesResolveFully(m, font, text, page.pagePtr, doc.docPtr),
+  )?.map((span) => ({
+    ...span,
+    fallbackFamily: deviceFamilyOf(doc, span.fontPtr) ?? span.fallbackFamily,
+  }));
+}
+
+/** `spans`, which run the length of `text`, cut into the spans of each of its lines. */
+function spansByLine(spans: readonly FontSpan[], text: string): FontSpan[][] {
+  const lines: FontSpan[][] = [];
+  let start = 0;
+  for (const line of text.split(/\r?\n/)) {
+    const at = text.indexOf(line, start);
+    lines.push(sliceFontSpans(spans, at, at + line.length));
+    start = at + line.length;
+  }
+  return lines;
+}
+
+// Reconstruct `paragraphLineSlots` from the data the overlay loop just emitted.
+function buildSlotsFromOverlayEmit(
+  m: WrappedPdfiumModule,
+  run: TextRun,
+  perLineEmits: Array<{
+    ptrs: number[];
+    texts: string[];
+    text: string;
+    x: number;
+    y: number;
+  }>,
+  fontId: string,
+): ParagraphLineSlot[] {
+  const slots = [];
+  let cursor = 0;
+  for (const emit of perLineEmits) {
+    const text = emit.text;
+    const startChar = cursor;
+    const endChar = startChar + text.length;
+    // Empty-line slot: no PDFium sub-objects, no bounds. matrixE + baselineY
+    // carry the expected anchor for the next edit.
+    if (emit.ptrs.length === 0 || text.length === 0) {
+      slots.push({
+        startChar,
+        endChar,
+        baselineY: emit.y,
+        matrixE: emit.x,
+        containerPtr: 0,
+        fontId,
+        fontSize: run.fontSize,
+        fontSubset: false,
+        mergedFromPtrs: [],
+        mergedFromTexts: [],
+        mergedFromBounds: [],
+        mergedFromCharStarts: [],
+      });
+      cursor = endChar + 1;
+      continue;
+    }
+    const mergedFromTexts: string[] = [];
+    const mergedFromPtrs: number[] = [];
+    const mergedFromBounds: Array<{ x: number; right: number }> = [];
+    const mergedFromCharStarts: number[] = [];
+    if (emit.texts.length === emit.ptrs.length) {
+      // The emitter told us what each ptr carries. Never re-derive it: it emits
+      // per word OR per character, and the word guess below silently dropped
+      // every ptr past the word count, leaving those glyphs painted forever.
+      let at = 0;
+      for (let i = 0; i < emit.ptrs.length; i++) {
+        const piece = emit.texts[i];
+        const found = text.indexOf(piece, at);
+        const start = found >= 0 ? found : at;
+        mergedFromPtrs.push(emit.ptrs[i]);
+        mergedFromTexts.push(piece);
+        mergedFromBounds.push(boundsFromPtr(m, emit.ptrs[i], run.matrix.e));
+        mergedFromCharStarts.push(start);
+        at = start + piece.length;
+      }
+    } else if (emit.ptrs.length === 1) {
+      mergedFromPtrs.push(emit.ptrs[0]);
+      mergedFromTexts.push(text);
+      mergedFromBounds.push(boundsFromPtr(m, emit.ptrs[0], run.matrix.e));
+      mergedFromCharStarts.push(0);
+    } else {
+      const words = text.split(/(\s+)/).filter((w) => w.length > 0);
+      const nonGapWords = words.filter((w) => !/^\s+$/.test(w));
+      const used = Math.min(emit.ptrs.length, nonGapWords.length);
+      let cur = 0;
+      let wordIdx = 0;
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (/^\s+$/.test(w)) {
+          cur += w.length;
+          continue;
+        }
+        if (wordIdx >= used) {
+          cur += w.length;
+          wordIdx += 1;
+          continue;
+        }
+        const ptr = emit.ptrs[wordIdx];
+        mergedFromPtrs.push(ptr);
+        mergedFromTexts.push(w);
+        mergedFromBounds.push(boundsFromPtr(m, ptr, run.matrix.e));
+        mergedFromCharStarts.push(cur);
+        cur += w.length;
+        wordIdx += 1;
+      }
+    }
+    slots.push({
+      startChar,
+      endChar,
+      baselineY: emit.y,
+      matrixE: run.matrix.e,
+      containerPtr: 0,
+      fontId,
+      fontSize: run.fontSize,
+      fontSubset: false,
+      mergedFromPtrs,
+      mergedFromTexts,
+      mergedFromBounds,
+      mergedFromCharStarts,
+    });
+    cursor = endChar + 1; // +1 for the "\n" separator
+  }
+  return slots;
+}
+
+function boundsFromPtr(
+  m: WrappedPdfiumModule,
+  ptr: number,
+  fallbackX: number,
+): { x: number; right: number } {
+  const buf = scratchPtr(m, SCRATCH.editBbox, 16);
+  if (!m.FPDFPageObj_GetBounds(ptr, buf, buf + 4, buf + 8, buf + 12)) {
+    return { x: fallbackX, right: fallbackX };
+  }
+  return {
+    x: m.pdfium.getValue(buf, "float"),
+    right: m.pdfium.getValue(buf + 8, "float"),
+  };
+}
+
+function keptLeadingBaselines(
+  lineCount: number,
+  match: Map<number, number>,
+  slots: ParagraphLineSlot[],
+  topBaseline: number,
+  lineHeight: number,
+): number[] {
+  const out: number[] = [];
+  let y = topBaseline;
+  for (let i = 0; i < lineCount; i++) {
+    if (i > 0) y -= stepBetween(i, match, slots, lineHeight);
+    out.push(y);
+  }
+  return out;
+}
+
+const MIN_REAL_LEADING = 0.5;
+
+function stepBetween(
+  i: number,
+  match: Map<number, number>,
+  slots: ParagraphLineSlot[],
+  lineHeight: number,
+): number {
+  const above = match.get(i - 1);
+  const here = match.get(i);
+  if (above === undefined || here === undefined) return lineHeight;
+  if (here !== above + 1) return lineHeight;
+  const delta = slots[above]?.baselineY - slots[here]?.baselineY;
+  if (!Number.isFinite(delta)) return lineHeight;
+  return delta >= MIN_REAL_LEADING * lineHeight ? delta : lineHeight;
+}
+
+function cloneSlot(s: ParagraphLineSlot): ParagraphLineSlot {
+  return {
+    startChar: s.startChar,
+    endChar: s.endChar,
+    baselineY: s.baselineY,
+    matrixE: s.matrixE,
+    containerPtr: s.containerPtr,
+    fontId: s.fontId,
+    fontSize: s.fontSize,
+    fontSubset: s.fontSubset,
+    mergedFromPtrs: [...s.mergedFromPtrs],
+    mergedFromTexts: [...s.mergedFromTexts],
+    mergedFromBounds: s.mergedFromBounds.map((b) => ({ ...b })),
+    mergedFromCharStarts: [...s.mergedFromCharStarts],
+  };
+}
+
+/**
+ * A blank line, inheriting its font from the line it was split off.
+ *
+ * Without `seed` the slot is stamped base-14 the moment Enter is pressed, and
+ * everything typed into it afterwards re-emits against that - so a new line
+ * came out in Helvetica while the paragraph around it kept the document's own
+ * face. The blank line has no glyphs of its own to judge by, so the only honest
+ * default is the font of the line it came from.
+ */
+export function emptySlot(
+  baselineY: number,
+  leftX: number,
+  run: TextRun,
+  fallbackFamily: string,
+  seed?: ParagraphLineSlot,
+): ParagraphLineSlot {
+  return {
+    startChar: 0,
+    endChar: 0,
+    baselineY,
+    matrixE: leftX,
+    containerPtr: 0,
+    fontId: seed ? seed.fontId : fallbackFontIdFor(fallbackFamily),
+    fontSize: run.fontSize,
+    fontSubset: seed ? seed.fontSubset : false,
+    mergedFromPtrs: [],
+    mergedFromTexts: [],
+    mergedFromBounds: [],
+    mergedFromCharStarts: [],
+  };
+}
+
+/** Build a slot for a freshly-emitted line, mapping each ptr to its word. */
+// Map the objects an emit produced back onto the line's text.
+//
+// One object per WORD is only what the base-14 path happens to produce; reusing
+// an embedded font can route through the per-character branch instead, and
+// assuming word alignment then filled the slot with empty sub-run texts and
+// out-of-range char starts, which the NEXT edit's diff silently mis-sliced.
+// `emitTextLine` reports what it wrote via outTexts; falling back to a text-page
+// read would cost a full page extraction per line.
+function sliceLineAcrossPtrs(
+  ptrs: number[],
+  text: string,
+  emitted?: string[],
+): Array<{ text: string; start: number }> {
+  const out: Array<{ text: string; start: number }> = [];
+  if (emitted && emitted.length === ptrs.length) {
+    let cursor = 0;
+    for (const chunk of emitted) {
+      const at = chunk.length > 0 ? text.indexOf(chunk, cursor) : -1;
+      const start = at >= 0 ? at : cursor;
+      out.push({ text: chunk, start });
+      cursor = start + chunk.length;
+    }
+    return out;
+  }
+  // No report from the emit: assume the base-14 shape, one object per word.
+  const words: Array<{ text: string; start: number }> = [];
+  const re = /\S+/g;
+  let wm: RegExpExecArray | null;
+  while ((wm = re.exec(text)) !== null) {
+    words.push({ text: wm[0], start: wm.index });
+  }
+  for (let i = 0; i < ptrs.length; i += 1) {
+    const w = words[i];
+    out.push(w ? { ...w } : { text: "", start: text.length });
+  }
+  return out;
+}
+
+function buildSlotForLine(
+  m: WrappedPdfiumModule,
+  ptrs: number[],
+  text: string,
+  baselineY: number,
+  leftX: number,
+  run: TextRun,
+  fontId: string,
+  emitted?: string[],
+): ParagraphLineSlot {
+  const mergedFromPtrs: number[] = [];
+  const mergedFromTexts: string[] = [];
+  const mergedFromBounds: Array<{ x: number; right: number }> = [];
+  const mergedFromCharStarts: number[] = [];
+  const words = sliceLineAcrossPtrs(ptrs, text, emitted);
+  for (let i = 0; i < ptrs.length; i++) {
+    const w = words[i];
+    const b = boundsFromPtr(m, ptrs[i], leftX);
+    mergedFromPtrs.push(ptrs[i]);
+    mergedFromTexts.push(w ? w.text : "");
+    mergedFromBounds.push({ x: b.x, right: b.right });
+    mergedFromCharStarts.push(w ? w.start : text.length);
+  }
+  return {
+    startChar: 0,
+    endChar: text.length,
+    baselineY,
+    matrixE: leftX,
+    containerPtr: 0,
+    fontId,
+    fontSize: run.fontSize,
+    fontSubset: false,
+    mergedFromPtrs,
+    mergedFromTexts,
+    mergedFromBounds,
+    mergedFromCharStarts,
+  };
+}
+
+function snapshotRunModel(run: TextRun): RunModelSnapshot {
+  return {
+    text: run.text,
+    matrixE: run.matrix.e,
+    matrixF: run.matrix.f,
+    bounds: { ...run.bounds },
+    paragraphLineHeight: run.paragraphLineHeight,
+    paragraphMemberPtrs: [...run.paragraphMemberPtrs],
+    paragraphMemberContainers: [...run.paragraphMemberContainers],
+    paragraphMemberFs: [...run.paragraphMemberFs],
+    paragraphLeafPtrs: [...run.paragraphLeafPtrs],
+    paragraphLeafContainers: [...run.paragraphLeafContainers],
+    paragraphLineSlots: run.paragraphLineSlots.map(cloneSlot),
+    mergedFromPtrs: [...run.mergedFromPtrs],
+    mergedFromTexts: [...run.mergedFromTexts],
+    mergedFromBounds: run.mergedFromBounds.map((b) => ({ ...b })),
+    mergedFromCharStarts: [...run.mergedFromCharStarts],
+    fontId: run.fontId,
+    fontSubset: run.fontSubset,
+    pdfiumObjPtr: run.pdfiumObjPtr,
+  };
+}
+
+interface OriginalObjects {
+  detached: number[];
+  matrices: Map<number, Float32Array>;
+  order: Map<number, number>;
+}
+
+/** What a partial apply left on the page, so its redo can put the same objects back. */
+interface PartialRedo {
+  plan: PartialEditPlan;
+  originals: OriginalObjects;
+  /** Drawn by the apply; detached while undone. */
+  inserted: number[];
+  /** The run's objects before the apply that it took off the page. */
+  detach: number[];
+  /** Objects the apply kept but gave new text. */
+  modified: Array<{ ptr: number; text: string }>;
+  matrices: Map<number, Float32Array>;
+  order: Map<number, number>;
+  model: RunModelSnapshot;
+}
+
+function captureOriginalObjects(
+  m: WrappedPdfiumModule,
+  run: TextRun,
+  ptrs: readonly number[],
+  removed: ReadonlyArray<{ ptr: number; containerPtr: number }>,
+  pagePtr: number,
+): OriginalObjects | null {
+  if (run.containerPtr !== 0) return null;
+  const inForm = new Set(
+    run.paragraphLeafPtrs.filter((_, i) => run.paragraphLeafContainers[i]),
+  );
+  if (
+    removed.some(({ ptr, containerPtr }) => containerPtr > 0 || inForm.has(ptr))
+  )
+    return null;
+  const matrices = new Map<number, Float32Array>();
+  for (const ptr of ptrs) {
+    if (!ptr) continue;
+    const matrix = readMatrix(m, ptr);
+    if (!matrix) return null;
+    matrices.set(ptr, matrix);
+  }
+  return {
+    detached: [...new Set(removed.map(({ ptr }) => ptr).filter(Boolean))],
+    matrices,
+    order: contentIndices(m, pagePtr, matrices.keys()),
+  };
+}
+
+function restoreRunModel(run: TextRun, snap: RunModelSnapshot): void {
+  run.matrix = { ...run.matrix, e: snap.matrixE, f: snap.matrixF };
+  run.bounds = { ...snap.bounds };
+  run.paragraphLineHeight = snap.paragraphLineHeight;
+  run.paragraphMemberPtrs = [...snap.paragraphMemberPtrs];
+  run.paragraphMemberContainers = [...snap.paragraphMemberContainers];
+  run.paragraphMemberFs = [...snap.paragraphMemberFs];
+  run.paragraphLeafPtrs = [...snap.paragraphLeafPtrs];
+  run.paragraphLeafContainers = [...snap.paragraphLeafContainers];
+  run.paragraphLineSlots = snap.paragraphLineSlots.map(cloneSlot);
+  run.mergedFromPtrs = [...snap.mergedFromPtrs];
+  run.mergedFromTexts = [...snap.mergedFromTexts];
+  run.mergedFromBounds = snap.mergedFromBounds.map((b) => ({ ...b }));
+  run.mergedFromCharStarts = [...snap.mergedFromCharStarts];
+  run.fontId = snap.fontId;
+  run.fontSubset = snap.fontSubset;
+  run.pdfiumObjPtr = snap.pdfiumObjPtr;
+}
+
+function restoreRunModelReplacing(
+  run: TextRun,
+  snap: RunModelSnapshot,
+  replacements: Map<number, number>,
+): void {
+  const swapped = (list: number[]) =>
+    list.map((ptr) => replacements.get(ptr) ?? ptr);
+  restoreRunModel(run, snap);
+  run.mergedFromPtrs = swapped(run.mergedFromPtrs);
+  run.paragraphLeafPtrs = swapped(run.paragraphLeafPtrs);
+  run.paragraphMemberPtrs = swapped(run.paragraphMemberPtrs);
+  for (const slot of run.paragraphLineSlots)
+    slot.mergedFromPtrs = swapped(slot.mergedFromPtrs);
+  run.pdfiumObjPtr = replacements.get(run.pdfiumObjPtr) ?? run.pdfiumObjPtr;
+}
+
+/** LCS over lines: maps next-line index -> matched prev-line index. */
+function lineLCS(a: string[], b: string[]): Map<number, number> {
+  const m = a.length;
+  const n = b.length;
+  const dp: Int32Array[] = new Array(m + 1);
+  for (let i = 0; i <= m; i++) dp[i] = new Int32Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1] + 1
+          : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  const map = new Map<number, number>();
+  let i = m;
+  let j = n;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) {
+      map.set(j - 1, i - 1);
+      i--;
+      j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  return map;
+}
+
+/** Rebuild the flat leaf arrays from the run's slots. */
+function reflattenLeafArrays(run: TextRun): void {
+  const leaf: number[] = [];
+  const leafContainers: number[] = [];
+  for (const s of run.paragraphLineSlots) {
+    for (const p of s.mergedFromPtrs) {
+      leaf.push(p);
+      leafContainers.push(s.containerPtr);
+    }
+  }
+  run.paragraphLeafPtrs = leaf;
+  run.paragraphLeafContainers = leafContainers;
+}
+
+/** Replace a restored slot (matched by baseline) with re-emitted objects. */
+function patchSlotPtrsByBaseline(
+  m: WrappedPdfiumModule,
+  run: TextRun,
+  baselineY: number,
+  ptrs: number[],
+  text: string,
+): void {
+  const idx = run.paragraphLineSlots.findIndex(
+    (s) => Math.abs(s.baselineY - baselineY) < 1,
+  );
+  if (idx < 0) return;
+  const old = run.paragraphLineSlots[idx];
+  const rebuilt = buildSlotForLine(
+    m,
+    ptrs,
+    text,
+    baselineY,
+    old.matrixE,
+    run,
+    old.fontId,
+  );
+  rebuilt.startChar = old.startChar;
+  rebuilt.endChar = old.endChar;
+  run.paragraphLineSlots[idx] = rebuilt;
+}
+
+interface SoftStarts {
+  flags: boolean[];
+  text: string;
+}
+
+function softStartsNow(run: TextRun): SoftStarts {
+  return { flags: softStartsOf(run), text: run.text };
+}
+
+function setSoftStarts(run: TextRun, soft: SoftStarts): void {
+  run.paragraphSoftStarts = [...soft.flags];
+  run.paragraphSoftStartsText = soft.text;
+}

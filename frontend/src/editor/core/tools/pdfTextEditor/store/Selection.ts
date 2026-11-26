@@ -1,0 +1,237 @@
+import type {
+  SelectionState,
+  TextRange,
+} from "@editor/tools/pdfTextEditor/types";
+
+// Singleton "find highlight" state, kept off the SelectionState (which is used
+// for edit commands) so search highlights survive normal selection changes.
+/** The find-bar occurrence on show: a range of one run's text. */
+export interface FindMatch {
+  runId: string;
+  range: TextRange;
+}
+
+function sameMatch(a: FindMatch | null, b: FindMatch | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.runId === b.runId &&
+    a.range.start === b.range.start &&
+    a.range.end === b.range.end
+  );
+}
+
+export class FindHighlight {
+  private match: FindMatch | null = null;
+  private listeners: Set<(match: FindMatch | null) => void> = new Set();
+
+  set(match: FindMatch | null): void {
+    if (sameMatch(this.match, match)) return;
+    this.match = match;
+    // Snapshot + guard so one throwing/unsubscribing listener can't abort
+    // notification of the rest (see EditorStore.notify for the rationale).
+    for (const l of Array.from(this.listeners)) {
+      try {
+        l(this.match);
+      } catch {
+        /* one listener throwing must not stop the rest */
+      }
+    }
+  }
+  get(): FindMatch | null {
+    return this.match;
+  }
+  subscribe(l: (match: FindMatch | null) => void): () => void {
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+}
+
+export class Selection {
+  private state: SelectionState;
+  private listeners: Set<(s: SelectionState) => void>;
+  /** Yellow highlight for the current find-bar match. */
+  readonly highlight: FindHighlight;
+
+  constructor() {
+    this.state = {
+      runIds: [],
+      imageIds: [],
+      shapeIds: [],
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    };
+    this.listeners = new Set();
+    this.highlight = new FindHighlight();
+  }
+
+  get value(): SelectionState {
+    return this.state;
+  }
+
+  set(next: SelectionState): void {
+    this.state = next;
+    this.notify();
+  }
+
+  clear(): void {
+    this.set({
+      runIds: [],
+      imageIds: [],
+      shapeIds: [],
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  selectOne(runId: string, caret: number | null = null): void {
+    this.set({
+      runIds: [runId],
+      imageIds: [],
+      shapeIds: [],
+      formFieldId: null,
+      caret,
+      textRange: null,
+    });
+  }
+
+  toggle(runId: string): void {
+    if (this.state.runIds.includes(runId)) {
+      this.set({
+        ...this.state,
+        runIds: this.state.runIds.filter((id) => id !== runId),
+        formFieldId: null,
+        caret: null,
+        textRange: null,
+      });
+    } else {
+      this.set({
+        ...this.state,
+        runIds: [...this.state.runIds, runId],
+        formFieldId: null,
+        caret: null,
+        textRange: null,
+      });
+    }
+  }
+
+  selectImage(imageId: string): void {
+    this.set({
+      runIds: [],
+      imageIds: [imageId],
+      shapeIds: [],
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  selectShape(shapeId: string): void {
+    this.set({
+      runIds: [],
+      imageIds: [],
+      shapeIds: [shapeId],
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  toggleShape(shapeId: string): void {
+    const shapeIds = this.state.shapeIds.includes(shapeId)
+      ? this.state.shapeIds.filter((id) => id !== shapeId)
+      : [...this.state.shapeIds, shapeId];
+    this.set({
+      ...this.state,
+      shapeIds,
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  /** Select form field widget `annotationId` (an AnnotationBox id) alone. */
+  selectFormField(annotationId: string): void {
+    this.set({
+      runIds: [],
+      imageIds: [],
+      shapeIds: [],
+      formFieldId: annotationId,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  /**
+   * Replace the selection with the given runs, images and shapes, or union
+   * them into it when additive (an extending rectangle-select). Additive keeps
+   * order and dedupes.
+   */
+  selectMany(
+    runIds: string[],
+    additive = false,
+    imageIds: string[] = [],
+    shapeIds: string[] = [],
+  ): void {
+    if (!additive) {
+      this.set({
+        runIds: [...runIds],
+        imageIds: [...imageIds],
+        shapeIds: [...shapeIds],
+        formFieldId: null,
+        caret: null,
+        textRange: null,
+      });
+      return;
+    }
+    this.set({
+      runIds: unionInOrder(this.state.runIds, runIds),
+      imageIds: unionInOrder(this.state.imageIds, imageIds),
+      shapeIds: unionInOrder(this.state.shapeIds, shapeIds),
+      formFieldId: null,
+      caret: null,
+      textRange: null,
+    });
+  }
+
+  /**
+   * Record the characters selected inside run `runId`. Ignored unless that
+   * run is the whole selection: a box keeps reporting while another
+   * selection is made.
+   */
+  setTextRange(runId: string, range: TextRange | null): void {
+    const { runIds, imageIds, shapeIds, textRange } = this.state;
+    if (runIds.length !== 1 || runIds[0] !== runId) return;
+    if (imageIds.length > 0 || shapeIds.length > 0) return;
+    if (textRange?.start === range?.start && textRange?.end === range?.end) {
+      return;
+    }
+    this.set({ ...this.state, textRange: range });
+  }
+
+  subscribe(listener: (s: SelectionState) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    // Snapshot + guard: a subscriber may synchronously unsubscribe others
+    // or throw; iterating the live Set would skip listeners or abort early.
+    for (const l of Array.from(this.listeners)) {
+      try {
+        l(this.state);
+      } catch {
+        /* one listener throwing must not stop the rest */
+      }
+    }
+  }
+}
+
+function unionInOrder(existing: string[], added: string[]): string[] {
+  const merged = [...existing];
+  for (const id of added) {
+    if (!merged.includes(id)) merged.push(id);
+  }
+  return merged;
+}

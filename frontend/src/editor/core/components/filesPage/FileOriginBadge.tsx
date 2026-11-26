@@ -1,0 +1,112 @@
+import React from "react";
+import { useTranslation } from "react-i18next";
+import { Tooltip } from "@mantine/core";
+import { Icon } from "@editor/ui/Icon";
+import { FileOrigin } from "@editor/components/filesPage/fileOrigin";
+import { OneDriveOriginTooltip } from "@editor/components/shared/OneDriveOriginTooltip";
+
+interface FileOriginBadgeProps {
+  origin: FileOrigin;
+  onDisk?: boolean;
+  fromOneDrive?: boolean;
+  /** Compact (icon-only) vs full (icon + text). */
+  compact?: boolean;
+  tooltip?: string;
+}
+
+const styles = {
+  base: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "0.25rem",
+    padding: "0.1rem 0.4rem",
+    borderRadius: "999px",
+    fontSize: "0.68rem",
+    fontWeight: 600,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.04em",
+    lineHeight: 1.2,
+  },
+  local: {
+    background: "color-mix(in srgb, var(--c-text-subtle) 16%, transparent)",
+    color: "var(--c-text-muted)",
+  },
+  cloud: {
+    background: "color-mix(in srgb, var(--c-primary) 16%, transparent)",
+    color: "var(--c-accent-text)",
+  },
+  shared: {
+    background:
+      "color-mix(in srgb, var(--mantine-color-orange-6) 16%, transparent)",
+    color: "var(--color-amber-dark)",
+  },
+};
+
+export function FileOriginBadge({
+  origin,
+  onDisk = false,
+  fromOneDrive = false,
+  compact = false,
+  tooltip,
+}: FileOriginBadgeProps) {
+  const { t } = useTranslation();
+
+  const config = (() => {
+    switch (origin) {
+      case "cloud":
+        return {
+          label: t("filesPage.origin.cloud", "Cloud"),
+          icon: <Icon name="cloud-check" size={"0.85rem"} />,
+          style: styles.cloud,
+          tooltip: t(
+            "filesPage.origin.cloudHint",
+            "Stored on the Kagaz server",
+          ),
+        };
+      case "shared-with-me":
+        return {
+          label: t("filesPage.origin.shared", "Shared"),
+          icon: <Icon name="users" size={"0.85rem"} />,
+          style: styles.shared,
+          tooltip: t("filesPage.origin.sharedHint", "Shared with you via link"),
+        };
+      case "local":
+      default:
+        if (fromOneDrive) {
+          return {
+            label: t("filesPage.origin.oneDrive", "OneDrive"),
+            icon: <Icon name="onedrive" size={"0.85rem"} />,
+            style: styles.local,
+            tooltip: (
+              <OneDriveOriginTooltip
+                label={t("oneDriveSave.fromOneDrive", "From OneDrive")}
+              />
+            ),
+          };
+        }
+        return {
+          label: t("filesPage.origin.local", "Local"),
+          icon: (
+            <Icon name={onDisk ? "monitor" : "cloud-off"} size={"0.85rem"} />
+          ),
+          style: styles.local,
+          tooltip: onDisk
+            ? t("filesPage.origin.diskFileHint", "Stored on your computer")
+            : t("filesPage.origin.localHint", "Not backed up"),
+        };
+    }
+  })();
+
+  const badge = (
+    <span style={{ ...styles.base, ...config.style }}>
+      {config.icon}
+      {!compact && config.label}
+    </span>
+  );
+
+  return (
+    <Tooltip label={tooltip ?? config.tooltip} withinPortal>
+      {badge}
+    </Tooltip>
+  );
+}

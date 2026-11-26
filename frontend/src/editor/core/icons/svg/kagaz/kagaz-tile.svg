@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <g transform="scale(0.09375)">
+    <rect width="256" height="256" rx="58" fill="var(--c-brand-mark)" />
+    <path d="M62 36 H152 L204 88 V220 H62 Z" fill="white" />
+    <path d="M152 36 V88 H204 Z" fill="white" fill-opacity="0.6" />
+  </g>
+</svg>

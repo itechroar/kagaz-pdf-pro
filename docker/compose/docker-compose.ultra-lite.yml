@@ -1,0 +1,37 @@
+services:
+  kagaz-pdf:
+    build:
+      context: ../..
+      dockerfile: docker/embedded/Dockerfile.ultra-lite
+    container_name: kagaz-pdf-ultra-lite
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080$${SYSTEM_ROOTURIPATH:-''}/api/v1/info/status | grep -q 'UP'"]
+      interval: 5s
+      timeout: 10s
+      retries: 16
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../../kagaz/latest/config:/configs:rw
+      - ../../kagaz/latest/logs:/logs:rw
+    environment:
+      DISABLE_ADDITIONAL_FEATURES: "true"
+      SECURITY_ENABLELOGIN: "false"
+      ENDPOINTS_GROUPS_TO_REMOVE: "CLI"
+      LANGS: "en_GB,en_US"
+      SYSTEM_DEFAULTLOCALE: en-US
+      UI_APPNAME: Kagaz-PDF
+      UI_HOMEDESCRIPTION: Ultra-lite version of Kagaz-PDF
+      UI_APPNAMENAVBAR: Kagaz-PDF Ultra-lite
+      SYSTEM_MAXFILESIZE: "50"
+    networks:
+      - kagaz-network
+
+networks:
+  kagaz-network:
+    driver: bridge

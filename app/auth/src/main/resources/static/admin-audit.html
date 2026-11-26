@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audit log · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main class="wide">
+<nav><a href="/">← Back to tools</a><a href="/admin-users.html">Users</a></nav>
+<div class="card"><h1>Audit log</h1>
+<label for="lim">Show latest</label>
+<select id="lim"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select>
+<div class="err" id="msg" role="alert"></div>
+<table><thead><tr><th>Time (UTC)</th><th>Action</th><th>Actor</th><th>Target</th><th>IP</th><th>Result</th></tr></thead><tbody id="rows"></tbody></table>
+</div></main><script src="/kagaz-auth/audit.js"></script></body></html>

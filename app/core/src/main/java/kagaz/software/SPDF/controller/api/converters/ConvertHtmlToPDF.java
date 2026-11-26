@@ -1,0 +1,82 @@
+package kagaz.software.SPDF.controller.api.converters;
+
+import java.nio.file.Files;
+
+import org.springframework.core.io.Resource;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.multipart.MultipartFile;
+
+import io.github.pixee.security.Filenames;
+import io.swagger.v3.oas.annotations.Operation;
+
+import lombok.RequiredArgsConstructor;
+
+import kagaz.software.SPDF.config.swagger.StandardPdfResponse;
+import kagaz.software.SPDF.service.OfficeToPdfService;
+import kagaz.software.common.annotations.AutoJobPostMapping;
+import kagaz.software.common.annotations.api.ConvertApi;
+import kagaz.software.common.enumeration.ResourceWeight;
+import kagaz.software.common.model.api.converters.HTMLToPdfRequest;
+import kagaz.software.common.model.tool.ToolFormat;
+import kagaz.software.common.model.tool.ToolIO;
+import kagaz.software.common.service.CustomPDFDocumentFactory;
+import kagaz.software.common.util.*;
+
+@ConvertApi
+@RequiredArgsConstructor
+public class ConvertHtmlToPDF {
+
+    private final CustomPDFDocumentFactory pdfDocumentFactory;
+
+    private final TempFileManager tempFileManager;
+    private final OfficeToPdfService officeToPdfService;
+
+    @AutoJobPostMapping(
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            value = "/html/pdf",
+            resourceWeight = ResourceWeight.LARGE_WEIGHT)
+    @StandardPdfResponse
+    // A ZIP of HTML plus its CSS is a first-class input here, and is what convert/pdf/html emits.
+    @ToolIO(
+            accepts = {ToolFormat.HTML, ToolFormat.ZIP},
+            inputExtensions = {"html", "zip"},
+            produces = ToolFormat.PDF)
+    @Operation(
+            summary = "Convert an HTML or ZIP (containing HTML and CSS) to PDF",
+            description =
+                    "This endpoint takes an HTML or ZIP file input and converts it to a PDF format.")
+    public ResponseEntity<Resource> HtmlToPdf(@ModelAttribute HTMLToPdfRequest request)
+            throws Exception {
+        MultipartFile fileInput = request.getFileInput();
+
+        if (fileInput == null) {
+            throw ExceptionUtils.createHtmlFileRequiredException();
+        }
+
+        String originalFilename = Filenames.toSimpleFileName(fileInput.getOriginalFilename());
+        if (originalFilename == null
+                || (!originalFilename.endsWith(".html") && !originalFilename.endsWith(".zip"))) {
+            throw ExceptionUtils.createIllegalArgumentException(
+                    "error.fileFormatRequired", "File must be in {0} format", ".html or .zip");
+        }
+
+        byte[] pdfBytes =
+                officeToPdfService.convertHtml(
+                        fileInput.getBytes(), originalFilename.endsWith(".zip"), request.getZoom());
+
+        pdfBytes = pdfDocumentFactory.createNewBytesBasedOnOldDocument(pdfBytes);
+
+        String outputFilename = GeneralUtils.generateFilename(originalFilename, ".pdf");
+
+        TempFile tempOut = tempFileManager.createManagedTempFile(".pdf");
+        try {
+            Files.write(tempOut.getPath(), pdfBytes);
+        } catch (Exception e) {
+            tempOut.close();
+            throw e;
+        }
+        return WebResponseUtils.pdfFileToWebResponse(tempOut, outputFilename);
+    }
+}

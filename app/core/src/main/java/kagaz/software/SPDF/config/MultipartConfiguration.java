@@ -1,0 +1,82 @@
+package kagaz.software.SPDF.config;
+
+import org.springframework.boot.servlet.MultipartConfigFactory;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
+import org.springframework.util.unit.DataSize;
+
+import jakarta.servlet.MultipartConfigElement;
+
+import lombok.extern.slf4j.Slf4j;
+
+import kagaz.software.SPDF.controller.web.UploadLimitService;
+
+/**
+ * Configuration for Spring multipart file upload settings. Synchronizes multipart limits with
+ * fileUploadLimit from settings.yml or environment variables (SYSTEMFILEUPLOADLIMIT or
+ * SYSTEM_MAXFILESIZE).
+ */
+@Configuration
+@Slf4j
+public class MultipartConfiguration {
+
+    private final UploadLimitService uploadLimitService;
+
+    public MultipartConfiguration(UploadLimitService uploadLimitService) {
+        this.uploadLimitService = uploadLimitService;
+    }
+
+    /**
+     * Creates MultipartConfigElement that respects fileUploadLimit from settings.yml or environment
+     * variables (SYSTEMFILEUPLOADLIMIT or SYSTEM_MAXFILESIZE). Depends on ApplicationProperties
+     * being initialized so @PostConstruct has run.
+     */
+    @Bean
+    @DependsOn("applicationProperties")
+    public MultipartConfigElement multipartConfigElement() {
+        MultipartConfigFactory factory = new MultipartConfigFactory();
+
+        // First check if SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE is explicitly set
+        String springMaxFileSize =
+                java.lang.System.getenv("SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE");
+        long uploadLimitBytes = 0;
+
+        if (springMaxFileSize != null && !springMaxFileSize.trim().isEmpty()) {
+            // Parse the Spring property format (e.g., "2000MB")
+            try {
+                DataSize dataSize = DataSize.parse(springMaxFileSize.trim());
+                uploadLimitBytes = dataSize.toBytes();
+                log.info("Using SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE: {}", springMaxFileSize);
+            } catch (Exception e) {
+                log.warn(
+                        "Failed to parse SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE: {}",
+                        springMaxFileSize,
+                        e);
+            }
+        }
+
+        // If not set via Spring property, use UploadLimitService which reads from
+        // fileUploadLimit (set from SYSTEMFILEUPLOADLIMIT/SYSTEM_MAXFILESIZE or settings.yml)
+        if (uploadLimitBytes == 0) {
+            uploadLimitBytes = uploadLimitService.getUploadLimit();
+            if (uploadLimitBytes > 0) {
+                log.info(
+                        "Using fileUploadLimit setting: {}",
+                        uploadLimitService.getReadableUploadLimit());
+            }
+        }
+
+        // No limit configured anywhere: accept any size (-1 means unlimited to Spring)
+        if (uploadLimitBytes == 0) {
+            uploadLimitBytes = -1;
+            log.info("No upload size limit configured: uploads are unlimited");
+        }
+
+        // Set max file size and max request size to the same value
+        factory.setMaxFileSize(DataSize.ofBytes(uploadLimitBytes));
+        factory.setMaxRequestSize(DataSize.ofBytes(uploadLimitBytes));
+
+        return factory.createMultipartConfig();
+    }
+}

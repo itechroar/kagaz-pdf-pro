@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Developer · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main class="wide">
+<nav><a href="/">← Back to tools</a><a href="/swagger-ui/index.html">API reference</a><a href="/ai.html">Document assistant</a><a href="#" id="out">Sign out</a></nav>
+<div class="card"><h1>Developer</h1>
+<p>Signed in as <strong id="who">…</strong>. Today: <strong id="used">0</strong> API calls<span id="lim"></span>.</p>
+<h2>API key</h2>
+<p>Send it as <code>X-API-KEY</code> or <code>Authorization: Bearer</code>. A new key replaces the old one and is shown once.</p>
+<button id="new" type="button">Create new key</button>
+<button id="rev" type="button" class="sec">Revoke key</button>
+<pre id="key" style="white-space:pre-wrap"></pre>
+<h2>Example</h2>
+<pre id="ex" style="white-space:pre-wrap"></pre>
+<div class="err" id="msg" role="alert"></div>
+<h2>Recent API calls</h2>
+<table><thead><tr><th>Time (UTC)</th><th>Call</th><th>Endpoint</th><th>Result</th></tr></thead><tbody id="rows"></tbody></table>
+</div></main><script src="/kagaz-auth/developer.js"></script></body></html>

@@ -1,0 +1,232 @@
+import i18n from "i18next";
+import type { EditorDocument } from "@editor/tools/pdfTextEditor/model/EditorDocument";
+import {
+  AnnotationEditError,
+  applyAnnotationEdits,
+} from "@editor/tools/pdfTextEditor/pdfdoc/passes/applyAnnotationEdits";
+import {
+  StructureEditError,
+  applyStructureEdits,
+} from "@editor/tools/pdfTextEditor/pdfdoc/passes/applyStructureEdits";
+import {
+  MarkInfoError,
+  applyMarked,
+} from "@editor/tools/pdfTextEditor/pdfdoc/passes/markTagged";
+import {
+  defineMissingGraphicsStates,
+  type ObjectOpacity,
+} from "@editor/tools/pdfTextEditor/pdfdoc/passes/defineMissingGraphicsStates";
+import { nameArtifactKinds } from "@editor/tools/pdfTextEditor/pdfdoc/passes/nameArtifactKinds";
+import { repairStructure } from "@editor/tools/pdfTextEditor/pdfdoc/passes/repairStructure";
+import { setDocumentLanguage } from "@editor/tools/pdfTextEditor/pdfdoc/passes/setDocumentLanguage";
+import { preserveShadings } from "@editor/tools/pdfTextEditor/pdfdoc/passes/preserveShadings";
+import { subsetEmbeddedFonts } from "@editor/tools/pdfTextEditor/pdfdoc/passes/subsetEmbeddedFonts";
+import { readMatrix } from "@editor/tools/pdfTextEditor/commands/textPieces";
+import {
+  readObjFill,
+  readObjStroke,
+} from "@editor/tools/pdfTextEditor/pdfium/PdfiumObjectColour";
+import { PdfiumSave } from "@editor/tools/pdfTextEditor/pdfium/PdfiumSave";
+import { writesArtifactKinds } from "@editor/tools/pdfTextEditor/pdfium/PdfiumTagMarks";
+import {
+  assertIncrementalAppend,
+  assertSavedPdf,
+} from "@editor/tools/pdfTextEditor/util/savedBytes";
+
+/** Serialize the editor document to a Blob. */
+export async function exportToBlob(doc: EditorDocument): Promise<Blob> {
+  const structureEdits = doc.structureEdits();
+  const annotationEdits = doc.annotationEdits();
+  const documentLanguage = doc.documentLanguageEdit();
+  // A signed document is appended to rather than rewritten, so the bytes the
+  // signature covers are still there and still verify for their revision.
+  const incremental = documentIsSigned(doc);
+  let bytes: Uint8Array;
+  if (documentIsPristine(doc)) {
+    // Nothing was ever written to a page, so PDFium has nothing to contribute:
+    // starting from what we opened keeps the file byte-identical. Rewriting it
+    // changed the bytes of 8 of this suite's 10 fixtures and inflated the small
+    // ones by up to 35% - for no edit at all.
+    if (
+      structureEdits.length === 0 &&
+      annotationEdits.length === 0 &&
+      documentLanguage === undefined &&
+      !doc.markedTaggedChanged()
+    ) {
+      return pdfBlob(doc.openedBytes);
+    }
+    bytes = doc.openedBytes;
+  } else {
+    bytes = await serializeEdits(doc, incremental);
+    try {
+      bytes = await nameArtifactKinds(bytes, pagesWritingArtifactKinds(doc));
+    } catch (err) {
+      throw accessibilitySaveFailed(err);
+    }
+  }
+
+  // Throws rather than dropping them: a description the user wrote that the
+  // saved file silently lacks is worse than a save that reports it failed.
+  try {
+    bytes = await applyStructureEdits(bytes, structureEdits);
+  } catch (err) {
+    if (!(err instanceof StructureEditError)) throw err;
+    throw accessibilitySaveFailed(err);
+  }
+  // After the structure edits, which add the elements links are given to.
+  try {
+    bytes = await applyAnnotationEdits(bytes, annotationEdits);
+  } catch (err) {
+    if (!(err instanceof AnnotationEditError)) throw err;
+    throw accessibilitySaveFailed(err);
+  }
+  if (documentLanguage !== undefined) {
+    try {
+      bytes = await setDocumentLanguage(bytes, documentLanguage);
+    } catch (err) {
+      throw accessibilitySaveFailed(err);
+    }
+  }
+  if (doc.markedTaggedChanged()) {
+    try {
+      bytes = await applyMarked(bytes, doc.markedTagged());
+    } catch (err) {
+      if (!(err instanceof MarkInfoError)) throw err;
+      throw accessibilitySaveFailed(err);
+    }
+  }
+
+  // After the edits: when the content an element described was deleted, the
+  // repair removes the ParentTree slot an edit to that element is addressed by,
+  // and the edit would then fail the save.
+  const regenerated = doc.regeneratedPages();
+  if (regenerated.length > 0) {
+    try {
+      const repaired = await repairStructure(bytes, {
+        pages: regenerated,
+        original: doc.openedBytes,
+      });
+      if (repaired) bytes = repaired;
+    } catch {
+      /* the unrepaired tags are what every save wrote before this pass */
+    }
+  }
+
+  // Re-checked after the repairs: `PdfiumSave.serialize` validated its own
+  // output, but the passes since may have swapped in a different buffer, and
+  // these are the bytes the workspace file is overwritten with.
+  assertSavedPdf(bytes);
+  if (incremental) assertIncrementalAppend(bytes, doc.openedBytes);
+
+  return pdfBlob(bytes);
+}
+
+function pagesWritingArtifactKinds(doc: EditorDocument): number[] {
+  return doc
+    .loadedPages()
+    .filter(
+      (page) =>
+        page.regenerated && writesArtifactKinds(doc.module, page.pagePtr),
+    )
+    .map((page) => page.index);
+}
+
+function accessibilitySaveFailed(cause: unknown): Error {
+  // It names pages and MCIDs: for a bug report, not for the user.
+  console.error(cause);
+  return new Error(
+    i18n.t(
+      "pdfTextEditor.inspector.accessibility.saveFailed",
+      "Your accessibility changes couldn't be saved, so the file wasn't saved. Undo them and try again.",
+    ),
+    { cause },
+  );
+}
+
+async function serializeEdits(
+  doc: EditorDocument,
+  incremental: boolean,
+): Promise<Uint8Array> {
+  // Must be read AFTER serialize: serialize is what marks pages regenerated,
+  // so reading first always yielded an empty list and silently skipped the
+  // shading repair on the first save after an edit.
+  let bytes = PdfiumSave.serialize(doc, { incremental });
+  // First, on PDFium's exact bytes; skipped for incremental saves, whose bytes a signature covers.
+  if (!incremental) {
+    bytes = await subsetEmbeddedFonts(
+      bytes,
+      doc.embeddedFontFiles(),
+      doc.openedBytes,
+    );
+  }
+  const regenerated = doc.regeneratedPages();
+  bytes = await defineMissingGraphicsStates(bytes, regenerated, (index, at) =>
+    opacitiesAt(doc, index, at),
+  );
+
+  if (regenerated.length > 0 && doc.openedBytes.length > 0) {
+    try {
+      const repaired = await preserveShadings(bytes, doc.openedBytes, {
+        pages: regenerated,
+      });
+      if (repaired && (!incremental || repaired.length >= bytes.length)) {
+        bytes = repaired;
+      }
+    } catch {
+      /* the unrepaired save is still a correct save */
+    }
+  }
+  return bytes;
+}
+
+// Within what PDFium's six significant digits leave of a transform.
+const MATRIX_SLACK = 1e-3;
+
+function opacitiesAt(
+  doc: EditorDocument,
+  pageIndex: number,
+  at: number[],
+): ObjectOpacity[] {
+  const m = doc.module;
+  const pagePtr = doc.page(pageIndex).pagePtr;
+  const out: ObjectOpacity[] = [];
+  for (let i = 0; i < m.FPDFPage_CountObjects(pagePtr); i++) {
+    const obj = m.FPDFPage_GetObject(pagePtr, i);
+    const matrix = obj ? readMatrix(m, obj) : null;
+    const same = matrix?.every(
+      (v, k) => Math.abs(v - at[k]) <= MATRIX_SLACK * Math.max(1, Math.abs(v)),
+    );
+    if (!same) continue;
+    const fill = readObjFill(m, obj);
+    const stroke = readObjStroke(m, obj);
+    if (fill && stroke) out.push({ fill: fill.a, stroke: stroke.a });
+  }
+  return out;
+}
+
+function pdfBlob(bytes: Uint8Array): Blob {
+  return new Blob([bytes as unknown as ArrayBuffer], {
+    type: "application/pdf",
+  });
+}
+
+/**
+ * True when no page's content stream has been regenerated and none is waiting
+ * to be. `regenerated` is sticky, so this stays false for every later save in
+ * a session that has edited once - a second save can never hand back the
+ * pre-edit bytes and silently revert the first.
+ */
+function documentIsPristine(doc: EditorDocument): boolean {
+  if (doc.openedBytes.length === 0) return false;
+  return doc
+    .loadedPages()
+    .every((p) => !p.regenerated && !p.needsGenerateContent);
+}
+
+function documentIsSigned(doc: EditorDocument): boolean {
+  try {
+    return doc.module.FPDF_GetSignatureCount(doc.docPtr) > 0;
+  } catch {
+    return false;
+  }
+}

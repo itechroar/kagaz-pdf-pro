@@ -1,0 +1,611 @@
+package kagaz.software.common.service;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+
+import jakarta.annotation.PreDestroy;
+import jakarta.servlet.http.HttpServletRequest;
+
+import lombok.extern.slf4j.Slf4j;
+
+import kagaz.software.common.model.job.JobResponse;
+import kagaz.software.common.util.ExecutorFactory;
+import kagaz.software.common.util.RegexPatternUtils;
+
+/** Service for executing jobs asynchronously or synchronously */
+@Service
+@Slf4j
+public class JobExecutorService {
+
+    /**
+     * Request attribute holding the FileStorage ids of persistent input copies made for the job
+     * about to be created. Populated before the job id exists (the aspect copies the upload while
+     * processing arguments), drained onto the JobResult as soon as the task is created so cleanup
+     * can delete them.
+     */
+    public static final String PENDING_INPUT_FILE_IDS_ATTR = "autoJobPendingInputFileIds";
+
+    private final TaskManager taskManager;
+    private final FileStorage fileStorage;
+    private final HttpServletRequest request;
+    private final ResourceMonitor resourceMonitor;
+    private final JobQueue jobQueue;
+    private final ExecutorService executor = ExecutorFactory.newVirtualThreadExecutor();
+    private final long effectiveTimeoutMs;
+
+    @Autowired(required = false)
+    private JobOwnershipService jobOwnershipService;
+
+    public JobExecutorService(
+            TaskManager taskManager,
+            FileStorage fileStorage,
+            HttpServletRequest request,
+            ResourceMonitor resourceMonitor,
+            JobQueue jobQueue,
+            @Value("${spring.mvc.async.request-timeout:1200000}") long asyncRequestTimeoutMs,
+            @Value("${server.servlet.session.timeout:30m}") String sessionTimeout) {
+        this.taskManager = taskManager;
+        this.fileStorage = fileStorage;
+        this.request = request;
+        this.resourceMonitor = resourceMonitor;
+        this.jobQueue = jobQueue;
+
+        long sessionTimeoutMs = parseSessionTimeout(sessionTimeout);
+        this.effectiveTimeoutMs = Math.min(asyncRequestTimeoutMs, sessionTimeoutMs);
+        log.debug(
+                "Job executor configured with effective timeout of {} ms", this.effectiveTimeoutMs);
+    }
+
+    /** Stop the service-owned executor when the application context is closed or restarted. */
+    @PreDestroy
+    public void shutdown() {
+        log.debug("Shutting down job executor");
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            executor.shutdownNow();
+        }
+    }
+
+    public ResponseEntity<?> runJobGeneric(boolean async, Supplier<Object> work) {
+        return runJobGeneric(async, work, -1);
+    }
+
+    public ResponseEntity<?> runJobGeneric(
+            boolean async, Supplier<Object> work, long customTimeoutMs) {
+        return runJobGeneric(async, work, customTimeoutMs, false, 50);
+    }
+
+    public ResponseEntity<?> runJobGeneric(
+            boolean async,
+            Supplier<Object> work,
+            long customTimeoutMs,
+            boolean queueable,
+            int resourceWeight) {
+        String baseJobId = UUID.randomUUID().toString();
+        String scopedJobKey = getScopedJobKey(baseJobId);
+
+        log.debug("Generated jobId: {} (base: {})", scopedJobKey, baseJobId);
+
+        if (request != null) {
+            request.setAttribute("jobId", scopedJobKey);
+        }
+
+        String jobId = scopedJobKey;
+
+        final String jobOwner =
+                jobOwnershipService != null
+                        ? jobOwnershipService.getCurrentUserId().orElse(null)
+                        : null;
+
+        long timeoutToUse = customTimeoutMs > 0 ? customTimeoutMs : effectiveTimeoutMs;
+
+        log.debug(
+                "Running job with ID: {}, async: {}, timeout: {}ms, queueable: {}, weight: {}",
+                jobId,
+                async,
+                timeoutToUse,
+                queueable,
+                resourceWeight);
+
+        boolean shouldQueue =
+                queueable
+                        && async
+                        && // Only async jobs can be queued
+                        resourceMonitor.shouldQueueJob(resourceWeight);
+
+        if (shouldQueue) {
+            log.debug(
+                    "Queueing job {} due to resource constraints (weight: {})",
+                    jobId,
+                    resourceWeight);
+
+            taskManager.createTask(jobId);
+            registerPendingInputFiles(jobId);
+
+            final String capturedJobIdForQueue = jobId;
+            Supplier<Object> wrappedWork =
+                    () -> {
+                        try {
+                            kagaz.software.common.util.JobContext.setJobId(
+                                    capturedJobIdForQueue);
+                            kagaz.software.common.util.JobContext.setOwner(jobOwner);
+                            Object result = work.get();
+                            processJobResult(capturedJobIdForQueue, result);
+                            return result;
+                        } catch (Exception e) {
+                            log.error(
+                                    "Error executing queued job {}: {}",
+                                    capturedJobIdForQueue,
+                                    e.getMessage(),
+                                    e);
+                            taskManager.setError(capturedJobIdForQueue, e.getMessage());
+                            throw e;
+                        } finally {
+                            kagaz.software.common.util.JobContext.clear();
+                        }
+                    };
+
+            CompletableFuture<ResponseEntity<?>> future =
+                    jobQueue.queueJob(jobId, resourceWeight, wrappedWork, timeoutToUse);
+            // A rejected job never runs, so fail its task here; otherwise the client polls
+            // forever and the abandoned-task sweep drops it without deleting its input copies.
+            future.whenComplete(
+                    (ignored, failure) -> {
+                        if (failure instanceof RejectedExecutionException) {
+                            taskManager.setError(capturedJobIdForQueue, failure.getMessage());
+                        }
+                    });
+
+            return ResponseEntity.ok().body(new JobResponse<>(true, jobId, null));
+        } else if (async) {
+            taskManager.createTask(jobId);
+            registerPendingInputFiles(jobId);
+
+            final String capturedJobId = jobId;
+
+            try {
+                executor.execute(
+                        () -> {
+                            try {
+                                log.debug(
+                                        "Running async job {} with timeout {} ms",
+                                        capturedJobId,
+                                        timeoutToUse);
+
+                                kagaz.software.common.util.JobContext.setJobId(capturedJobId);
+                                kagaz.software.common.util.JobContext.setOwner(jobOwner);
+                                Object result = executeWithTimeout(() -> work.get(), timeoutToUse);
+                                processJobResult(capturedJobId, result);
+                            } catch (TimeoutException te) {
+                                log.error("Job {} timed out after {} ms", jobId, timeoutToUse);
+                                taskManager.setError(jobId, "Job timed out");
+                            } catch (Exception e) {
+                                log.error("Error executing job {}: {}", jobId, e.getMessage(), e);
+                                taskManager.setError(jobId, e.getMessage());
+                            } finally {
+                                kagaz.software.common.util.JobContext.clear();
+                            }
+                        });
+            } catch (RejectedExecutionException e) {
+                // Executor shut down: fail the task so its input copies are cleaned up.
+                taskManager.setError(capturedJobId, "Job rejected: " + e.getMessage());
+            }
+
+            return ResponseEntity.ok().body(new JobResponse<>(true, jobId, null));
+        } else {
+            try {
+                log.debug("Running sync job with timeout {} ms", timeoutToUse);
+
+                kagaz.software.common.util.JobContext.setJobId(jobId);
+                Object result = executeWithTimeout(() -> work.get(), timeoutToUse);
+
+                if (result instanceof ResponseEntity) {
+                    return (ResponseEntity<?>) result;
+                }
+
+                return handleResultForSyncJob(result);
+            } catch (TimeoutException te) {
+                log.error("Synchronous job timed out after {} ms", timeoutToUse);
+                return ResponseEntity.internalServerError()
+                        .body(Map.of("error", "Job timed out after " + timeoutToUse + " ms"));
+            } catch (RuntimeException e) {
+                Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+                for (Throwable nested = e;
+                        nested != null && seen.add(nested);
+                        nested = nested.getCause()) {
+                    if (nested instanceof org.springframework.web.ErrorResponseException response) {
+                        throw response;
+                    }
+                }
+                Throwable cause = e.getCause();
+                if (e instanceof IllegalArgumentException
+                        || cause
+                                instanceof
+                                kagaz.software.common.util.ExceptionUtils.BaseAppException
+                        || cause
+                                instanceof
+                                kagaz.software.common.util.ExceptionUtils
+                                        .BaseValidationException) {
+                    throw e;
+                }
+                log.error("Error executing synchronous job: {}", e.getMessage(), e);
+                return ResponseEntity.internalServerError()
+                        .body(Map.of("error", "Job failed: " + e.getMessage()));
+            } catch (Exception e) {
+                log.error("Error executing synchronous job: {}", e.getMessage(), e);
+                return ResponseEntity.internalServerError()
+                        .body(Map.of("error", "Job failed: " + e.getMessage()));
+            } finally {
+                kagaz.software.common.util.JobContext.clear();
+            }
+        }
+    }
+
+    private void processJobResult(String jobId, Object result) {
+        try {
+            if (result instanceof byte[]) {
+                String fileId = fileStorage.storeBytes((byte[]) result, "result.pdf");
+                taskManager.setFileResult(
+                        jobId, fileId, "result.pdf", MediaType.APPLICATION_PDF_VALUE);
+                log.debug("Stored byte[] result with fileId: {}", fileId);
+            } else if (result instanceof ResponseEntity) {
+                ResponseEntity<?> response = (ResponseEntity<?>) result;
+                Object body = response.getBody();
+
+                if (!response.getStatusCode().is2xxSuccessful()) {
+                    String error =
+                            "Job rejected with HTTP status " + response.getStatusCode().value();
+                    String reason = rejectionReason(response);
+                    if (reason != null) {
+                        error += ": " + reason;
+                    } else if (response.getHeaders().getLocation() != null) {
+                        error += " at " + response.getHeaders().getLocation();
+                    }
+                    taskManager.setError(jobId, error);
+                    return;
+                }
+
+                if (body instanceof byte[]) {
+                    String filename = extractResponseFilename(response);
+                    String contentType = extractResponseContentType(response);
+
+                    String fileId = fileStorage.storeBytes((byte[]) body, filename);
+                    taskManager.setFileResult(jobId, fileId, filename, contentType);
+                    log.debug("Stored ResponseEntity<byte[]> result with fileId: {}", fileId);
+                } else if (body instanceof StreamingResponseBody streamingBody) {
+                    String filename = extractResponseFilename(response);
+                    String contentType = extractResponseContentType(response);
+
+                    String fileId = fileStorage.storeFromStreamingBody(streamingBody, filename);
+                    taskManager.setFileResult(jobId, fileId, filename, contentType);
+                    log.debug(
+                            "Stored ResponseEntity<StreamingResponseBody> result with fileId: {}",
+                            fileId);
+                } else if (body instanceof Resource resource) {
+                    String filename = extractResponseFilename(response);
+                    String contentType = extractResponseContentType(response);
+
+                    String fileId = fileStorage.storeFromResource(resource, filename);
+                    taskManager.setFileResult(jobId, fileId, filename, contentType);
+                    log.debug("Stored ResponseEntity<Resource> result with fileId: {}", fileId);
+                } else {
+                    if (body != null && body.toString().contains("fileId")) {
+                        try {
+                            java.lang.reflect.Method getFileId =
+                                    body.getClass().getMethod("getFileId");
+                            String fileId = (String) getFileId.invoke(body);
+
+                            if (fileId != null && !fileId.isEmpty()) {
+                                String filename = "result.pdf";
+                                String contentType = MediaType.APPLICATION_PDF_VALUE;
+
+                                try {
+                                    java.lang.reflect.Method getOriginalFileName =
+                                            body.getClass().getMethod("getOriginalFilename");
+                                    String origName = (String) getOriginalFileName.invoke(body);
+                                    if (origName != null && !origName.isEmpty()) {
+                                        filename = origName;
+                                    }
+                                } catch (Exception e) {
+                                    log.debug(
+                                            "Could not get original filename: {}", e.getMessage());
+                                }
+
+                                try {
+                                    java.lang.reflect.Method getContentType =
+                                            body.getClass().getMethod("getContentType");
+                                    String ct = (String) getContentType.invoke(body);
+                                    if (ct != null && !ct.isEmpty()) {
+                                        contentType = ct;
+                                    }
+                                } catch (Exception e) {
+                                    log.debug("Could not get content type: {}", e.getMessage());
+                                }
+
+                                taskManager.setFileResult(jobId, fileId, filename, contentType);
+                                log.debug("Extracted fileId from response body: {}", fileId);
+
+                                taskManager.setComplete(jobId);
+                                return;
+                            }
+                        } catch (Exception e) {
+                            log.debug(
+                                    "Failed to extract fileId from response body: {}",
+                                    e.getMessage());
+                        }
+                    }
+
+                    taskManager.setResult(jobId, body);
+                }
+            } else if (result instanceof MultipartFile file) {
+                String fileId = fileStorage.storeFile(file);
+                taskManager.setFileResult(
+                        jobId, fileId, file.getOriginalFilename(), file.getContentType());
+                log.debug("Stored MultipartFile result with fileId: {}", fileId);
+            } else {
+                if (result != null) {
+                    try {
+                        java.lang.reflect.Method getFileId =
+                                result.getClass().getMethod("getFileId");
+                        String fileId = (String) getFileId.invoke(result);
+
+                        if (fileId != null && !fileId.isEmpty()) {
+                            String filename = "result.pdf";
+                            String contentType = MediaType.APPLICATION_PDF_VALUE;
+
+                            try {
+                                java.lang.reflect.Method getOriginalFileName =
+                                        result.getClass().getMethod("getOriginalFilename");
+                                String origName = (String) getOriginalFileName.invoke(result);
+                                if (origName != null && !origName.isEmpty()) {
+                                    filename = origName;
+                                }
+                            } catch (Exception e) {
+                                log.debug("Could not get original filename: {}", e.getMessage());
+                            }
+
+                            try {
+                                java.lang.reflect.Method getContentType =
+                                        result.getClass().getMethod("getContentType");
+                                String ct = (String) getContentType.invoke(result);
+                                if (ct != null && !ct.isEmpty()) {
+                                    contentType = ct;
+                                }
+                            } catch (Exception e) {
+                                log.debug("Could not get content type: {}", e.getMessage());
+                            }
+
+                            taskManager.setFileResult(jobId, fileId, filename, contentType);
+                            log.debug("Extracted fileId from result object: {}", fileId);
+
+                            taskManager.setComplete(jobId);
+                            return;
+                        }
+                    } catch (Exception e) {
+                        log.debug(
+                                "Failed to extract fileId from result object: {}", e.getMessage());
+                    }
+                }
+
+                taskManager.setResult(jobId, result);
+            }
+
+            taskManager.setComplete(jobId);
+        } catch (Exception e) {
+            log.error("Error processing job result: {}", e.getMessage(), e);
+            taskManager.setError(jobId, "Error processing result: " + e.getMessage());
+        }
+    }
+
+    private ResponseEntity<?> handleResultForSyncJob(Object result) throws IOException {
+        if (result instanceof byte[]) {
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_PDF)
+                    .header(
+                            HttpHeaders.CONTENT_DISPOSITION,
+                            "form-data; name=\"attachment\"; filename=\"result.pdf\"")
+                    .body(result);
+        } else if (result instanceof MultipartFile file) {
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(file.getContentType()))
+                    .header(
+                            HttpHeaders.CONTENT_DISPOSITION,
+                            "form-data; name=\"attachment\"; filename=\""
+                                    + file.getOriginalFilename()
+                                    + "\"")
+                    .body(file.getBytes());
+        } else {
+            return ResponseEntity.ok(result);
+        }
+    }
+
+    private static final int MAX_REJECTION_REASON_CHARS = 300;
+
+    /** The short message a rejecting endpoint gave, or null when it sent none worth showing. */
+    static String rejectionReason(ResponseEntity<?> response) {
+        Object body = response.getBody();
+        String reason = null;
+        if (body instanceof String text) {
+            reason = text;
+        } else if (body instanceof Map<?, ?> map) {
+            Object value = map.containsKey("error") ? map.get("error") : map.get("message");
+            reason = value instanceof String text ? text : null;
+        } else if (isPlainText(response.getHeaders().getContentType())) {
+            reason = smallText(body);
+        }
+        if (reason == null || reason.isBlank()) {
+            return null;
+        }
+        String flat = reason.strip().replaceAll("\\s+", " ");
+        return flat.length() > MAX_REJECTION_REASON_CHARS
+                ? flat.substring(0, MAX_REJECTION_REASON_CHARS) + "..."
+                : flat;
+    }
+
+    private static boolean isPlainText(MediaType contentType) {
+        return contentType != null && MediaType.TEXT_PLAIN.isCompatibleWith(contentType);
+    }
+
+    private static String smallText(Object body) {
+        try {
+            byte[] bytes;
+            if (body instanceof byte[] raw) {
+                bytes = raw;
+            } else if (body instanceof Resource resource && resource.isReadable()) {
+                if (resource.contentLength() > 4096) {
+                    return null;
+                }
+                try (var in = resource.getInputStream()) {
+                    bytes = in.readNBytes(4096);
+                }
+            } else {
+                return null;
+            }
+            return bytes.length > 4096 ? null : new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static String extractResponseFilename(ResponseEntity<?> response) {
+        if (response.getHeaders().getContentDisposition() != null) {
+            String filename = response.getHeaders().getContentDisposition().getFilename();
+            if (filename != null && !filename.isEmpty()) {
+                return filename;
+            }
+        }
+        return "result.pdf";
+    }
+
+    private static String extractResponseContentType(ResponseEntity<?> response) {
+        MediaType mediaType = response.getHeaders().getContentType();
+        return mediaType != null ? mediaType.toString() : MediaType.APPLICATION_PDF_VALUE;
+    }
+
+    private long parseSessionTimeout(String timeout) {
+        if (timeout == null || timeout.isEmpty()) {
+            return 30 * 60 * 1000;
+        }
+
+        try {
+            String value =
+                    RegexPatternUtils.getInstance()
+                            .getNonDigitDotPattern()
+                            .matcher(timeout)
+                            .replaceAll("");
+            String unit =
+                    RegexPatternUtils.getInstance()
+                            .getDigitDotPattern()
+                            .matcher(timeout)
+                            .replaceAll("");
+
+            double numericValue = Double.parseDouble(value);
+
+            return switch (unit.toLowerCase()) {
+                case "s" -> (long) (numericValue * 1000);
+                case "m" -> (long) (numericValue * 60 * 1000);
+                case "h" -> (long) (numericValue * 60 * 60 * 1000);
+                case "d" -> (long) (numericValue * 24 * 60 * 60 * 1000);
+                default -> (long) (numericValue * 60 * 1000);
+            };
+        } catch (Exception e) {
+            log.warn("Could not parse session timeout '{}', using default", timeout);
+            return 30 * 60 * 1000;
+        }
+    }
+
+    private <T> T executeWithTimeout(Supplier<T> supplier, long timeoutMs)
+            throws TimeoutException, Exception {
+        String currentJobId = kagaz.software.common.util.JobContext.getJobId();
+
+        java.util.concurrent.CompletableFuture<T> future =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> {
+                            if (currentJobId != null) {
+                                kagaz.software.common.util.JobContext.setJobId(currentJobId);
+                            }
+                            try {
+                                return supplier.get();
+                            } finally {
+                                if (currentJobId != null) {
+                                    kagaz.software.common.util.JobContext.clear();
+                                }
+                            }
+                        },
+                        executor);
+
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            future.cancel(true);
+            throw new TimeoutException("Execution timed out after " + timeoutMs + " ms");
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw (Exception) e.getCause();
+        } catch (java.util.concurrent.CancellationException e) {
+            throw new Exception("Execution was cancelled", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new Exception("Execution was interrupted", e);
+        }
+    }
+
+    private String getScopedJobKey(String baseJobId) {
+        if (jobOwnershipService != null) {
+            return jobOwnershipService.createScopedJobKey(baseJobId);
+        }
+        return baseJobId;
+    }
+
+    /**
+     * Hand the input copies made while processing arguments to the freshly created job, so job
+     * cleanup deletes them. Drains the attribute so a retry cannot attribute the same ids twice.
+     */
+    @SuppressWarnings("unchecked")
+    private void registerPendingInputFiles(String jobId) {
+        if (request == null) {
+            return;
+        }
+        Object pending;
+        try {
+            pending = request.getAttribute(PENDING_INPUT_FILE_IDS_ATTR);
+            request.removeAttribute(PENDING_INPUT_FILE_IDS_ATTR);
+        } catch (RuntimeException ex) {
+            // No request bound to this thread (e.g. an internally dispatched job).
+            log.debug("Could not read pending input file ids: {}", ex.getMessage());
+            return;
+        }
+        if (!(pending instanceof List<?> ids)) {
+            return;
+        }
+        for (String fileId : (List<String>) ids) {
+            taskManager.registerInputFile(jobId, fileId);
+        }
+    }
+}

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Document assistant · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main class="wide">
+<nav><a href="/">← Back to tools</a><a href="/developer.html">Developer</a></nav>
+<div class="card"><h1>Document assistant</h1>
+<p id="status">Checking…</p>
+<label for="f">PDF (scans are read with OCR)</label><input id="f" type="file" accept="application/pdf">
+<label for="q">Question (leave empty to summarize)</label><input id="q" maxlength="4000">
+<button id="go" type="button">Ask</button>
+<div class="err" id="msg" role="alert"></div>
+<pre id="out" style="white-space:pre-wrap"></pre>
+</div></main><script src="/kagaz-auth/ai.js"></script></body></html>

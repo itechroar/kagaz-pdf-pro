@@ -1,0 +1,197 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  isLocalFontAccessSupported,
+  listLocalFonts,
+  listLocalFontsIfGranted,
+  resetLocalFontsCache,
+} from "@editor/tools/pdfTextEditor/util/localFonts";
+
+type QueryStub = () => Promise<unknown[]>;
+
+function setQuery(stub: QueryStub | null): void {
+  const w = window as unknown as { queryLocalFonts?: QueryStub };
+  if (stub) w.queryLocalFonts = stub;
+  else delete w.queryLocalFonts;
+}
+
+function face(
+  family: string,
+  style: string,
+  postscriptName: string,
+): Record<string, string> {
+  return { family, style, postscriptName, fullName: `${family} ${style}` };
+}
+
+beforeEach(() => {
+  resetLocalFontsCache();
+  setQuery(null);
+});
+
+afterEach(() => {
+  resetLocalFontsCache();
+  setQuery(null);
+});
+
+describe("isLocalFontAccessSupported", () => {
+  it("is false when the API is missing", () => {
+    expect(isLocalFontAccessSupported()).toBe(false);
+  });
+
+  it("is true when the API exists, without calling it", () => {
+    const query = vi.fn<QueryStub>().mockResolvedValue([]);
+    setQuery(query);
+    expect(isLocalFontAccessSupported()).toBe(true);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe("listLocalFonts", () => {
+  it("returns null in a browser without the API", async () => {
+    await expect(listLocalFonts()).resolves.toBeNull();
+  });
+
+  it("maps the faces the API returns", async () => {
+    setQuery(
+      vi
+        .fn<QueryStub>()
+        .mockResolvedValue([
+          face("Inter", "Regular", "Inter-Regular"),
+          face("Inter", "Bold", "Inter-Bold"),
+        ]),
+    );
+    const fonts = await listLocalFonts();
+    expect(fonts).toEqual([
+      {
+        family: "Inter",
+        style: "Regular",
+        postscriptName: "Inter-Regular",
+        fullName: "Inter Regular",
+      },
+      {
+        family: "Inter",
+        style: "Bold",
+        postscriptName: "Inter-Bold",
+        fullName: "Inter Bold",
+      },
+    ]);
+  });
+
+  it("drops entries without a usable family", async () => {
+    setQuery(
+      vi
+        .fn<QueryStub>()
+        .mockResolvedValue([
+          face("Inter", "Regular", "Inter-Regular"),
+          { family: 42, style: "Regular" },
+          { style: "Bold" },
+          null,
+        ]),
+    );
+    const fonts = await listLocalFonts();
+    expect(fonts).toHaveLength(1);
+    expect(fonts?.[0]?.family).toBe("Inter");
+  });
+
+  it("returns null when permission is denied", async () => {
+    for (const name of ["SecurityError", "NotAllowedError"]) {
+      resetLocalFontsCache();
+      const error = new Error("denied");
+      error.name = name;
+      setQuery(vi.fn<QueryStub>().mockRejectedValue(error));
+      await expect(listLocalFonts()).resolves.toBeNull();
+    }
+  });
+
+  it("returns null when the API throws unexpectedly", async () => {
+    setQuery(
+      vi.fn<QueryStub>().mockImplementation(() => {
+        throw new TypeError("boom");
+      }),
+    );
+    await expect(listLocalFonts()).resolves.toBeNull();
+  });
+
+  it("returns null when the API resolves to a non-array", async () => {
+    setQuery(
+      vi.fn<QueryStub>().mockResolvedValue(undefined as unknown as unknown[]),
+    );
+    await expect(listLocalFonts()).resolves.toBeNull();
+  });
+
+  it("queries once per session so the prompt fires at most once", async () => {
+    const query = vi
+      .fn<QueryStub>()
+      .mockResolvedValue([face("Inter", "Regular", "Inter-Regular")]);
+    setQuery(query);
+
+    const [first, second] = await Promise.all([
+      listLocalFonts(),
+      listLocalFonts(),
+    ]);
+    await listLocalFonts();
+
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(first).toBe(second);
+
+    resetLocalFontsCache();
+    await listLocalFonts();
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it("memoises a denial instead of re-prompting", async () => {
+    const error = new Error("denied");
+    error.name = "NotAllowedError";
+    const query = vi.fn<QueryStub>().mockRejectedValue(error);
+    setQuery(query);
+
+    await expect(listLocalFonts()).resolves.toBeNull();
+    await expect(listLocalFonts()).resolves.toBeNull();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("listLocalFontsIfGranted", () => {
+  function setPermission(state: PermissionState): void {
+    Object.defineProperty(navigator, "permissions", {
+      configurable: true,
+      value: { query: vi.fn().mockResolvedValue({ state }) },
+    });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, "permissions");
+  });
+
+  it("lists the fonts when access was already granted", async () => {
+    setPermission("granted");
+    setQuery(
+      vi.fn<QueryStub>().mockResolvedValue([face("Acme", "Regular", "Acme")]),
+    );
+    const fonts = await listLocalFontsIfGranted();
+    expect(fonts?.map((f) => f.family)).toEqual(["Acme"]);
+  });
+
+  it("lists the fonts once access is granted after an earlier query failed", async () => {
+    setQuery(vi.fn<QueryStub>().mockRejectedValue(new Error("dismissed")));
+    await expect(listLocalFonts()).resolves.toBeNull();
+    setPermission("granted");
+    setQuery(
+      vi.fn<QueryStub>().mockResolvedValue([face("Acme", "Regular", "Acme")]),
+    );
+    const fonts = await listLocalFontsIfGranted();
+    expect(fonts?.map((f) => f.family)).toEqual(["Acme"]);
+  });
+
+  it("never asks when access would have to be requested", async () => {
+    setPermission("prompt");
+    const query = vi.fn<QueryStub>().mockResolvedValue([]);
+    setQuery(query);
+    await expect(listLocalFontsIfGranted()).resolves.toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("returns null in a browser without the API", async () => {
+    setPermission("granted");
+    await expect(listLocalFontsIfGranted()).resolves.toBeNull();
+  });
+});

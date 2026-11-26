@@ -1,0 +1,225 @@
+package kagaz.software.SPDF.controller.api.misc;
+
+import java.awt.Color;
+import java.io.IOException;
+import java.util.List;
+import java.util.Locale;
+
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import org.apache.pdfbox.util.Matrix;
+import org.springframework.core.io.Resource;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.multipart.MultipartFile;
+
+import io.github.pixee.security.Filenames;
+import io.swagger.v3.oas.annotations.Operation;
+
+import lombok.RequiredArgsConstructor;
+
+import kagaz.software.SPDF.config.swagger.StandardPdfResponse;
+import kagaz.software.SPDF.model.api.misc.AddPageNumbersRequest;
+import kagaz.software.common.annotations.AutoJobPostMapping;
+import kagaz.software.common.annotations.api.MiscApi;
+import kagaz.software.common.enumeration.ResourceWeight;
+import kagaz.software.common.model.tool.ToolFormat;
+import kagaz.software.common.model.tool.ToolIO;
+import kagaz.software.common.service.CustomPDFDocumentFactory;
+import kagaz.software.common.util.GeneralUtils;
+import kagaz.software.common.util.TempFile;
+import kagaz.software.common.util.TempFileManager;
+import kagaz.software.common.util.WebResponseUtils;
+
+@MiscApi
+@RequiredArgsConstructor
+public class PageNumbersController {
+
+    private final CustomPDFDocumentFactory pdfDocumentFactory;
+    private final TempFileManager tempFileManager;
+
+    @AutoJobPostMapping(
+            value = "/add-page-numbers",
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            resourceWeight = ResourceWeight.SMALL_WEIGHT)
+    @StandardPdfResponse
+    @ToolIO(produces = ToolFormat.PDF)
+    @Operation(
+            summary = "Add page numbers to a PDF document",
+            description = "This operation takes an input PDF file and adds page numbers to it.")
+    public ResponseEntity<Resource> addPageNumbers(@ModelAttribute AddPageNumbersRequest request)
+            throws IOException {
+
+        MultipartFile file = request.getFileInput();
+        String customMargin = request.getCustomMargin();
+        int position = request.getPosition();
+        int pageNumber = request.getStartingNumber();
+        String pagesToNumber = request.getPagesToNumber();
+        String customText = request.getCustomText();
+        int zeroPad = request.getZeroPad();
+        float fontSize = request.getFontSize();
+        String fontType = request.getFontType();
+        String fontColor = request.getFontColor();
+        // compute padded number string where requested
+        String formatN;
+        if (zeroPad > 0) {
+            formatN = String.format("%%0%dd", Math.max(0, zeroPad));
+        } else {
+            formatN = "%d";
+        }
+
+        Color color = Color.BLACK;
+        if (fontColor != null && !fontColor.trim().isEmpty()) {
+            try {
+                color = Color.decode(fontColor);
+            } catch (NumberFormatException e) {
+                color = Color.BLACK;
+            }
+        }
+
+        try (PDDocument document = pdfDocumentFactory.load(file)) {
+            float marginFactor =
+                    switch (customMargin == null ? "" : customMargin.toLowerCase(Locale.ROOT)) {
+                        case "small" -> 0.02f;
+                        case "large" -> 0.05f;
+                        case "x-large" -> 0.075f;
+                        case "medium" -> 0.035f;
+                        default -> 0.035f;
+                    };
+
+            if (pagesToNumber == null || pagesToNumber.isEmpty()) {
+                pagesToNumber = "all";
+            }
+            if (customText == null || customText.isEmpty()) {
+                customText = "{n}";
+            }
+
+            GeneralUtils.requireValidPageSelection(pagesToNumber, document.getNumberOfPages());
+            List<Integer> pagesToNumberList =
+                    GeneralUtils.parsePageList(
+                            pagesToNumber.split(","), document.getNumberOfPages());
+
+            // Clamp position to 1..9 (1 = top-left, 9 = bottom-right)
+            int pos = Math.max(1, Math.min(9, position));
+
+            for (int i : pagesToNumberList) {
+                PDPage page = document.getPage(i);
+                PDRectangle cropBox = page.getCropBox();
+                int rotation = page.getRotation();
+                // The page as a reader sees it. The anchors below are laid out on it, then mapped
+                // back to the page's own unrotated space, where the content stream draws.
+                PDRectangle pageSize =
+                        rotation == 90 || rotation == 270
+                                ? new PDRectangle(cropBox.getHeight(), cropBox.getWidth())
+                                : new PDRectangle(cropBox.getWidth(), cropBox.getHeight());
+
+                String nFormatted = String.format(formatN, pageNumber);
+                String text =
+                        customText
+                                .replace("{n}", nFormatted)
+                                .replace("{total}", String.valueOf(document.getNumberOfPages()))
+                                .replace(
+                                        "{filename}",
+                                        GeneralUtils.removeExtension(
+                                                Filenames.toSimpleFileName(
+                                                        file.getOriginalFilename())));
+
+                PDType1Font currentFont =
+                        switch (fontType == null ? "" : fontType.toLowerCase(Locale.ROOT)) {
+                            case "courier" -> new PDType1Font(Standard14Fonts.FontName.COURIER);
+                            case "times" -> new PDType1Font(Standard14Fonts.FontName.TIMES_ROMAN);
+                            default -> new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+                        };
+
+                // Text dimensions and font metrics
+                float textWidth = currentFont.getStringWidth(text) / 1000f * fontSize;
+                float ascent = currentFont.getFontDescriptor().getAscent() / 1000f * fontSize;
+                float descent = currentFont.getFontDescriptor().getDescent() / 1000f * fontSize;
+
+                // Derive column/row in range 1..3 (1 = left/top, 2 = center/middle, 3 =
+                // right/bottom)
+                int col = ((pos - 1) % 3) + 1; // 1 = left, 2 = center, 3 = right
+                int row = ((pos - 1) / 3) + 1; // 1 = top, 2 = middle, 3 = bottom
+
+                // Anchor coordinates with margin
+                float leftX = pageSize.getLowerLeftX() + marginFactor * pageSize.getWidth();
+                float midX = pageSize.getLowerLeftX() + pageSize.getWidth() / 2f;
+                float rightX = pageSize.getUpperRightX() - marginFactor * pageSize.getWidth();
+
+                float botY = pageSize.getLowerLeftY() + marginFactor * pageSize.getHeight();
+                float midY = pageSize.getLowerLeftY() + pageSize.getHeight() / 2f;
+                float topY = pageSize.getUpperRightY() - marginFactor * pageSize.getHeight();
+
+                // Horizontal alignment: left = anchor, center = centered, right = right-aligned
+                float x =
+                        switch (col) {
+                            case 1 -> leftX;
+                            case 2 -> midX - textWidth / 2f;
+                            default -> rightX - textWidth;
+                        };
+
+                // Vertical alignment (baseline!):
+                // top    = align text top at topY,
+                // middle = optical middle using ascent/descent,
+                // bottom = baseline at botY
+                float y =
+                        switch (row) {
+                            case 1 -> topY - ascent;
+                            case 2 -> midY - (ascent + descent) / 2f;
+                            default -> botY;
+                        };
+
+                float originX =
+                        switch (rotation) {
+                            case 90 -> cropBox.getUpperRightX() - y;
+                            case 180 -> cropBox.getUpperRightX() - x;
+                            case 270 -> cropBox.getLowerLeftX() + y;
+                            default -> cropBox.getLowerLeftX() + x;
+                        };
+                float originY =
+                        switch (rotation) {
+                            case 90 -> cropBox.getLowerLeftY() + x;
+                            case 180 -> cropBox.getUpperRightY() - y;
+                            case 270 -> cropBox.getUpperRightY() - x;
+                            default -> cropBox.getLowerLeftY() + y;
+                        };
+
+                try (PDPageContentStream contentStream =
+                        new PDPageContentStream(
+                                document,
+                                page,
+                                PDPageContentStream.AppendMode.APPEND,
+                                true,
+                                true)) {
+                    contentStream.beginText();
+                    contentStream.setFont(currentFont, fontSize);
+                    contentStream.setNonStrokingColor(color);
+                    // /Rotate turns the page clockwise for display, so the text is turned the
+                    // same angle the other way to read upright.
+                    contentStream.setTextMatrix(
+                            Matrix.getRotateInstance(Math.toRadians(rotation), originX, originY));
+                    contentStream.showText(text);
+                    contentStream.endText();
+                }
+
+                pageNumber++;
+            }
+
+            TempFile tempOut = tempFileManager.createManagedTempFile(".pdf");
+            try {
+                document.save(tempOut.getFile());
+            } catch (IOException e) {
+                tempOut.close();
+                throw e;
+            }
+
+            return WebResponseUtils.pdfFileToWebResponse(
+                    tempOut, GeneralUtils.generateFilename(file.getOriginalFilename(), ".pdf"));
+        }
+    }
+}

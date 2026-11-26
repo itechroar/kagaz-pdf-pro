@@ -1,0 +1,194 @@
+name: verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npx tsc --noEmit --project src/editor/core/tsconfig.json
+        working-directory: frontend
+      - run: npx vitest run
+        working-directory: frontend
+      - run: npx vite build --mode core
+        working-directory: frontend
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+        working-directory: desktop
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew build -x spotlessCheck --stacktrace
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build the server jar
+        run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
+      - name: Start the server with login enabled
+        env:
+          SECURITY_ENABLELOGIN: "true"
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+          KAGAZ_BASE_PATH: ${{ runner.temp }}/kagaz-data/
+        run: |
+          JAR=$(ls app/core/build/libs/*.jar | grep -v plain | head -1)
+          nohup java -Dkagaz.base-path="$KAGAZ_BASE_PATH" -jar "$JAR" > server.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/login.html >/dev/null && exit 0
+            sleep 2
+          done
+          tail -80 server.log
+          exit 1
+      - name: Run the smoke test
+        env:
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+        run: scripts/smoke-test.sh
+      - name: Server log
+        if: always()
+        run: tail -150 server.log
+
+  smoke-sso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
+      - name: Start a mock identity provider and the server
+        env:
+          SECURITY_ENABLELOGIN: "true"
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+          KAGAZ_AUTH_PUBLIC_URL: http://localhost:8080
+          KAGAZ_AUTH_OIDC_ISSUER: http://localhost:9000
+          KAGAZ_AUTH_OIDC_CLIENT_ID: kagaz-test
+          KAGAZ_AUTH_OIDC_CLIENT_SECRET: test-secret
+          KAGAZ_AUTH_OIDC_ALLOWED_EMAIL_DOMAINS: example.com
+          KAGAZ_AUTH_OIDC_ADMIN_EMAILS: boss@example.com
+        run: |
+          nohup node scripts/mock-oidc.js > mock.log 2>&1 &
+          JAR=$(ls app/core/build/libs/*.jar | grep -v plain | head -1)
+          nohup java -Dkagaz.base-path="${{ runner.temp }}/kagaz-data/" -jar "$JAR" > server.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/login.html >/dev/null && exit 0
+            sleep 2
+          done
+          tail -80 server.log
+          exit 1
+      - run: scripts/smoke-sso.sh
+      - name: Logs
+        if: always()
+        run: |
+          tail -60 mock.log || true
+          tail -100 server.log || true
+
+  smoke-ai:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tesseract and Pillow for the OCR check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng
+          pip install pillow
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
+      - name: Start a mock model server and the app
+        env:
+          SECURITY_ENABLELOGIN: "true"
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+          KAGAZ_AUTH_QUOTA_DAILY_REQUESTS: "8"
+          KAGAZ_AI_CHUNK_CHARS: "1000"
+          KAGAZ_AI_PROVIDER: openai
+          KAGAZ_AI_BASE_URL: http://localhost:9100
+          KAGAZ_AI_API_KEY: test-llm-key
+          KAGAZ_AI_MODEL: mock-model
+        run: |
+          nohup node scripts/mock-llm.js > mock.log 2>&1 &
+          JAR=$(ls app/core/build/libs/*.jar | grep -v plain | head -1)
+          nohup java -Dkagaz.base-path="${{ runner.temp }}/kagaz-data/" -jar "$JAR" > server.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/login.html >/dev/null && exit 0
+            sleep 2
+          done
+          tail -80 server.log
+          exit 1
+      - run: scripts/smoke-ai.sh
+        env:
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+      - name: Logs
+        if: always()
+        run: |
+          tail -60 mock.log || true
+          tail -100 server.log || true
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build base and app images
+        run: ./scripts/build-docker.sh
+      - name: Start the container with login enabled
+        run: |
+          docker run -d --name kagaz -p 8080:8080 \
+            -e SECURITY_ENABLELOGIN=true -e KAGAZ_AUTH_ADMIN_PASSWORD=smoke-admin-pass-1 \
+            kagaz-pdf:local
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/login.html >/dev/null && exit 0
+            sleep 3
+          done
+          docker logs kagaz | tail -80
+          exit 1
+      - name: Smoke test the container
+        env:
+          KAGAZ_AUTH_ADMIN_PASSWORD: smoke-admin-pass-1
+        run: scripts/smoke-test.sh
+      - name: Container health and log
+        if: always()
+        run: |
+          docker inspect --format '{{.State.Health.Status}}' kagaz || true
+          docker logs kagaz 2>&1 | tail -80

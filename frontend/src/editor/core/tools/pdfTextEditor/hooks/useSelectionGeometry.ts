@@ -1,0 +1,156 @@
+import { useMemo } from "react";
+import { MoveTextRunCommand } from "@editor/tools/pdfTextEditor/commands/MoveTextRunCommand";
+import {
+  canResizeRun,
+  resizeRunCommand,
+} from "@editor/tools/pdfTextEditor/commands/resizeRun";
+import { SetImageTransformCommand } from "@editor/tools/pdfTextEditor/commands/SetImageTransformCommand";
+import {
+  imageBoundsForVisible,
+  visibleImageBounds,
+} from "@editor/tools/pdfTextEditor/util/imageClip";
+import type { EditorStore } from "@editor/tools/pdfTextEditor/store/EditorStore";
+import type { EditorViewState } from "@editor/tools/pdfTextEditor/store/EditorStore";
+import type {
+  ImageObjectSnapshot,
+  PageRect,
+  SelectionState,
+} from "@editor/tools/pdfTextEditor/types";
+
+export interface SingleSelectionGeometry {
+  bounds: PageRect;
+  setX: (next: number) => void;
+  setY: (next: number) => void;
+  setWidth?: (next: number) => void;
+  /** Absent for text runs: their height follows the type, not a handle. */
+  setHeight?: (next: number) => void;
+}
+
+export interface SelectionGeometry {
+  /** Null unless exactly one object is selected. */
+  single: SingleSelectionGeometry | null;
+}
+
+/**
+ * Numeric position/size for the inspector, in PDF points.
+ *
+ * Only meaningful for a single object - the fields would have to invent a
+ * value for a mixed selection, so the panel shows a hint instead.
+ */
+// The panel may draw a deferred snapshot, so setters read bounds from the store when they run.
+function liveRunBounds(
+  store: EditorStore,
+  runId: string,
+  fallback: PageRect,
+): PageRect {
+  for (const page of store.getState().pages) {
+    const run = page.runs.find((r) => r.id === runId);
+    if (run) return run.bounds;
+  }
+  return fallback;
+}
+
+function liveImage(
+  store: EditorStore,
+  imageId: string,
+  fallback: ImageObjectSnapshot,
+): ImageObjectSnapshot {
+  for (const page of store.getState().pages) {
+    const img = page.images.find((i) => i.id === imageId);
+    if (img) return img;
+  }
+  return fallback;
+}
+
+export function useSelectionGeometry(
+  store: EditorStore,
+  state: EditorViewState,
+  selection: SelectionState,
+): SelectionGeometry {
+  return useMemo(() => {
+    const runId = selection.runIds[0];
+    const imageId = selection.imageIds[0];
+    const total =
+      selection.runIds.length +
+      selection.imageIds.length +
+      selection.shapeIds.length;
+    if (total !== 1) return { single: null };
+
+    if (runId) {
+      for (const page of state.pages) {
+        const run = page.runs.find((r) => r.id === runId);
+        if (!run) continue;
+        const pageIndex = page.pageIndex;
+        const bounds = run.wrapWidthPt
+          ? { ...run.bounds, width: run.wrapWidthPt }
+          : run.bounds;
+        return {
+          single: {
+            bounds,
+            setX: (next) =>
+              store.dispatch(
+                new MoveTextRunCommand({
+                  pageIndex,
+                  runId,
+                  dx: next - liveRunBounds(store, runId, bounds).x,
+                  dy: 0,
+                }),
+              ),
+            setY: (next) =>
+              store.dispatch(
+                new MoveTextRunCommand({
+                  pageIndex,
+                  runId,
+                  dx: 0,
+                  dy: next - liveRunBounds(store, runId, bounds).y,
+                }),
+              ),
+            // Narrowing a run is exactly the wrap gesture, so it reuses the
+            // same command the canvas resize handle drives.
+            setWidth: canResizeRun(run)
+              ? (next) => {
+                  const doc = store.document;
+                  const cmd =
+                    doc && resizeRunCommand(doc, pageIndex, runId, next);
+                  if (cmd) store.dispatch(cmd);
+                }
+              : undefined,
+          },
+        };
+      }
+      return { single: null };
+    }
+
+    if (imageId) {
+      for (const page of state.pages) {
+        const img = page.images.find((i) => i.id === imageId);
+        if (!img) continue;
+        const pageIndex = page.pageIndex;
+        const bounds = visibleImageBounds(img);
+        const set = (patch: Partial<PageRect>) => {
+          const live = liveImage(store, imageId, img);
+          store.dispatch(
+            new SetImageTransformCommand({
+              pageIndex,
+              imageId,
+              nextBounds: imageBoundsForVisible(live, {
+                ...visibleImageBounds(live),
+                ...patch,
+              }),
+            }),
+          );
+        };
+        return {
+          single: {
+            bounds,
+            setX: (next) => set({ x: next }),
+            setY: (next) => set({ y: next }),
+            setWidth: (next) => set({ width: Math.max(1, next) }),
+            setHeight: (next) => set({ height: Math.max(1, next) }),
+          },
+        };
+      }
+    }
+    return { single: null };
+  }, [store, state.pages, selection]);
+}
