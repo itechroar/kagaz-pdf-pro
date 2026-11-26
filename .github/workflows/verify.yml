@@ -192,3 +192,20 @@ jobs:
         run: |
           docker inspect --format '{{.State.Health.Status}}' kagaz || true
           docker logs kagaz 2>&1 | tail -80
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - run: gradle -p android :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kagaz-pdf-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Kagaz PDF</string>
+    <string name="server_hint">Server address, e.g. https://pdf.example.com</string>
+    <string name="connect">Connect</string>
+    <string name="bad_url">Enter a valid address. Plain http is only allowed for local or private network servers.</string>
+    <string name="change_server">Change server</string>
+</resources>

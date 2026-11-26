@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kagaz PDF Pro: private PDF toolkit for web, desktop and Android</title>
+<meta name="description" content="Self-hosted PDF tools with login, SSO, audit log and an AI assistant. Runs online, on your network, or fully offline.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header><div class="wrap"><a class="logo" href="#">Kagaz PDF Pro</a>
+<nav><a href="#features">Features</a><a href="#download">Download</a><a href="#deploy">Deploy</a></nav></div></header>
+<main>
+<section class="hero"><div class="wrap">
+<h1>Every PDF tool, on your own server.</h1>
+<p>Merge, split, compress, convert, sign and OCR your documents. Add login, SSO and an AI assistant. Works online, on your network, or completely offline.</p>
+<a class="btn" href="#download">Download</a><a class="btn alt" href="#deploy">Self-host</a>
+</div></section>
+<section id="features"><div class="wrap"><h2>What you get</h2>
+<div class="grid">
+<div class="card"><h3>Full PDF toolkit</h3><p>Dozens of tools behind a REST API and a modern web editor, with tool chaining and automation pipelines.</p></div>
+<div class="card"><h3>Users and SSO</h3><p>Local accounts, API keys, per-user quotas and OpenID Connect sign-in with PKCE.</p></div>
+<div class="card"><h3>Audit log</h3><p>A record of every change made through the API, with an admin page to review it.</p></div>
+<div class="card"><h3>AI assistant</h3><p>Summarise and ask questions about any PDF using Anthropic, OpenAI, Gemini, Ollama and more. Scanned files are read with OCR.</p></div>
+<div class="card"><h3>Offline ready</h3><p>Runs with no internet. Offline mode keeps AI traffic on local models only.</p></div>
+<div class="card"><h3>Hardened by default</h3><p>Hashed passwords and keys, login rate limiting, strict security headers and secure cookies over HTTPS.</p></div>
+</div></div></section>
+<section id="download"><div class="wrap"><h2>Download</h2>
+<div class="grid">
+<div class="card"><h3>Windows, macOS, Linux</h3><p>Desktop app with the server bundled. No setup.</p><p><a href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the installer</a></p></div>
+<div class="card"><h3>Android</h3><p>Connects to your Kagaz PDF server over HTTPS or your local network.</p><p><a href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the APK</a></p></div>
+<div class="card"><h3>Docker</h3><p>One command for a server your whole team can use.</p></div>
+</div></div></section>
+<section id="deploy"><div class="wrap"><h2>Self-host in a minute</h2>
+<pre><code>git clone https://github.com/itechroar/kagaz-pdf-pro
+cd kagaz-pdf-pro
+cp .env.example .env     # set KAGAZ_AUTH_ADMIN_PASSWORD
+docker compose up -d</code></pre>
+<p>Then open <code>http://localhost:8080</code>. See the deployment guide in the repository for HTTPS, SSO, AI keys and offline setups.</p>
+</div></section>
+</main>
+<footer><div class="wrap">Kagaz PDF Pro, licensed under Apache-2.0. Includes MIT-licensed open-source components; see NOTICE in the repository.</div></footer>
+</body>
+</html>

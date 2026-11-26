@@ -33,6 +33,12 @@ SSO options (all `KAGAZ_AUTH_OIDC_*` env vars map to `kagaz.auth.oidc.*`): `ISSU
 
 Limits you should know about: the React UI itself has no login screen; the server redirects unauthenticated browsers to `/login.html`. There are no teams, per-user quotas or per-tool permissions, and users live in a single file (`kagaz-users.tsv` in the config directory), which suits one server, not a cluster.
 
+## Apps and website
+
+- **Desktop** (`desktop/`): Electron app with the server and a bundled JRE; installers for Windows, macOS and Linux are built by the `release` workflow.
+- **Android** (`android/`): Kotlin app that connects to your server. https is required for public hosts; plain http only for local and private networks. Built by CI as an APK.
+- **Website** (`website/`): static landing page, deployed to GitHub Pages by the `website` workflow.
+
 ## Configuration
 
 Every option is an environment variable; `.env.example` lists all of them. The AI assistant supports Anthropic, OpenAI, Gemini, OpenRouter, Groq, Mistral, Together, DeepSeek, xAI, Ollama, LM Studio, vLLM and any OpenAI-compatible server. Add your key later: until then the page says "Not ready yet" and nothing fails. Documents of any length are read in parts, scanned PDFs are read with OCR (Tesseract, offline), and uploads are unlimited unless you set a limit. See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker, offline and online setups.
