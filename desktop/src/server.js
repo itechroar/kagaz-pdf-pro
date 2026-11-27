@@ -7,11 +7,11 @@ const { spawn } = require('node:child_process');
 const { serverEnv } = require('./tools');
 
 /** Asks the OS for a free loopback port. */
-function freePort() {
+function freePort(preferred = 0) {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
+    srv.once('error', (e) => (preferred ? freePort(0).then(resolve, reject) : reject(e)));
+    srv.listen(preferred, '127.0.0.1', () => {
       const { port } = srv.address();
       srv.close(() => resolve(port));
     });
@@ -35,12 +35,17 @@ function logTail(logPath, maxChars = 1200) {
   }
 }
 
-function buildArgs({ jar, port, dataDir }) {
+/**
+ * JVM arguments. Default is loopback-only with login off (single local user). With `lan` set the
+ * server listens on all interfaces, so login is forced on with the given admin password.
+ */
+function buildArgs({ jar, port, dataDir, lan = false, adminPassword = '' }) {
   return [
     '-Xmx1g',
     `-Dserver.port=${port}`,
-    '-Dserver.address=127.0.0.1',
-    '-Dsecurity.enableLogin=false',
+    `-Dserver.address=${lan ? '0.0.0.0' : '127.0.0.1'}`,
+    `-Dsecurity.enableLogin=${lan ? 'true' : 'false'}`,
+    ...(lan && adminPassword ? [`-Dkagaz.auth.admin-password=${adminPassword}`] : []),
     `-Dkagaz.base-path=${dataDir}${path.sep}`,
     '-jar',
     jar,
@@ -69,14 +74,14 @@ function waitForServer(port, timeoutMs = 240000, intervalMs = 500, isCancelled =
   });
 }
 
-async function startServer({ serverDir, dataDir }) {
+async function startServer({ serverDir, dataDir, lan = false, adminPassword = '', preferredPort = 0 }) {
   const jar = path.join(serverDir, 'kagaz-pdf.jar');
   if (!fs.existsSync(jar)) throw new Error(`Server jar not found: ${jar}`);
   fs.mkdirSync(dataDir, { recursive: true });
-  const port = await freePort();
+  const port = await freePort(lan ? preferredPort : 0);
   const logPath = path.join(dataDir, 'server.log');
   const logFd = fs.openSync(logPath, 'w');
-  const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir }), {
+  const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir, lan, adminPassword }), {
     cwd: dataDir,
     env: serverEnv(process.platform, process.env, serverDir),
     stdio: ['ignore', logFd, logFd],

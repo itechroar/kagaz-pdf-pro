@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 /**
  * Helper programs the server shells out to. Each feature silently disables itself when its tool is
@@ -71,4 +72,36 @@ function installCommand(platform) {
   return INSTALL_COMMANDS[platform] || INSTALL_COMMANDS.linux;
 }
 
-module.exports = { TOOLS, extraPathDirs, serverEnv, missingTools, installCommand, findOnPath };
+const WINDOWS_INSTALL_SCRIPT = [
+  'winget install -e --id ArtifexSoftware.GhostScript --accept-package-agreements --accept-source-agreements',
+  'winget install -e --id QPDF.QPDF --accept-package-agreements --accept-source-agreements',
+  'winget install -e --id UB-Mannheim.TesseractOCR --accept-package-agreements --accept-source-agreements',
+  'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements',
+  'py -3.12 -m pip install ocrmypdf',
+  'Write-Host "Done. Restart Kagaz PDF."',
+].join('; ');
+
+/** Opens a terminal that runs the platform's install command so the user sees progress and can answer password prompts. */
+function installInTerminal(platform, env) {
+  const detach = { detached: true, stdio: 'ignore' };
+  if (platform === 'win32') {
+    spawn('cmd.exe', ['/c', 'start', 'Kagaz PDF helper install', 'powershell', '-NoExit', '-Command', WINDOWS_INSTALL_SCRIPT], detach).unref();
+    return true;
+  }
+  const command = `${installCommand(platform)}; echo; echo "Done. Restart Kagaz PDF."; read -r -p "Press Enter to close"`;
+  if (platform === 'darwin') {
+    const script = `tell application "Terminal" to do script "${command.replace(/"/g, '\\"')}"`;
+    spawn('osascript', ['-e', script, '-e', 'tell application "Terminal" to activate'], detach).unref();
+    return true;
+  }
+  const terminals = [['x-terminal-emulator', ['-e']], ['gnome-terminal', ['--']], ['konsole', ['-e']], ['xterm', ['-e']]];
+  for (const [bin, args] of terminals) {
+    if (findOnPath([bin], env, platform)) {
+      spawn(bin, [...args, 'bash', '-c', command], detach).unref();
+      return true;
+    }
+  }
+  return false;
+}
+
+module.exports = { installInTerminal, TOOLS, extraPathDirs, serverEnv, missingTools, installCommand, findOnPath };

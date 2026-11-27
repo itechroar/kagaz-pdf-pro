@@ -49,6 +49,22 @@ test('buildArgs turns login off for the loopback-only desktop server', () => {
   assert.ok(buildArgs({ jar: '/x/k.jar', port: 1, dataDir: '/d' }).includes('-Dsecurity.enableLogin=false'));
 });
 
+test('buildArgs in phone mode listens on all interfaces with login and a password', () => {
+  const a = buildArgs({ jar: '/x/k.jar', port: 8080, dataDir: '/d', lan: true, adminPassword: 'pw123' });
+  assert.ok(a.includes('-Dserver.address=0.0.0.0'));
+  assert.ok(a.includes('-Dsecurity.enableLogin=true'));
+  assert.ok(a.includes('-Dkagaz.auth.admin-password=pw123'));
+});
+
+test('freePort falls back when the preferred port is taken', async () => {
+  const busy = http.createServer();
+  await new Promise((r) => busy.listen(0, '127.0.0.1', r));
+  const taken = busy.address().port;
+  const p = await freePort(taken);
+  assert.notStrictEqual(p, taken);
+  busy.close();
+});
+
 test('waitForServer rejects on timeout', async () => {
   const p = await freePort();
   await assert.rejects(waitForServer(p, 300, 50), /did not start/);
