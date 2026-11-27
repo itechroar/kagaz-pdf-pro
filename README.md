@@ -39,6 +39,16 @@ Limits you should know about: the React UI itself has no login screen; the serve
 - **Android** (`android/`): Kotlin app that connects to your server. https is required for public hosts; plain http only for local and private networks. Built by CI as an APK.
 - **Website** (`website/`): static landing page, deployed to GitHub Pages by the `website` workflow.
 
+## Desktop helper tools
+
+The Docker image includes every helper program. The desktop app uses the ones installed on your computer, and tells you at launch which are missing. OCR, Cleanup files, Auto rotate, Repair, Compress, Replace and invert colour and similar tools need Ghostscript, qpdf, Tesseract, OCRmyPDF and unpaper:
+
+- Windows: `winget install ArtifexSoftware.GhostScript QPDF.QPDF UB-Mannheim.TesseractOCR Python.Python.3.12` then `pip install ocrmypdf`
+- macOS: `brew install ghostscript qpdf tesseract tesseract-lang ocrmypdf unpaper`
+- Linux: `sudo apt install ghostscript qpdf tesseract-ocr ocrmypdf unpaper`
+
+Restart the app afterwards. The Android app has no server inside: it connects to a Kagaz PDF server (for example one started with `setup.sh`).
+
 ## Configuration
 
 Every option is an environment variable; `.env.example` lists all of them. The AI assistant supports Anthropic, OpenAI, Gemini, OpenRouter, Groq, Mistral, Together, DeepSeek, xAI, Ollama, LM Studio, vLLM and any OpenAI-compatible server. Add your key later: until then the page says "Not ready yet" and nothing fails. Documents of any length are read in parts, scanned PDFs are read with OCR (Tesseract, offline), and uploads are unlimited unless you set a limit. See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker, offline and online setups.

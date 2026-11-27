@@ -4,7 +4,7 @@
     <string name="setup_subtitle">Enter the address of your Kagaz PDF server to get started.</string>
     <string name="server_label">Server address</string>
     <string name="server_hint">pdf.example.com</string>
-    <string name="server_helper">Use https for servers on the internet. Plain http works only on your own network.</string>
+    <string name="server_helper">This app connects to a Kagaz PDF server that you run, for example on your computer (use its Wi-Fi address like 192.168.1.5:8080). Use https for servers on the internet.</string>
     <string name="connect">Connect</string>
     <string name="bad_url">Enter a valid address. Plain http is only allowed for local or private network servers.</string>
     <string name="err_unreachable">Can\'t reach this server. Check the address and your connection.</string>

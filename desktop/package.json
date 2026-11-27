@@ -28,6 +28,10 @@
           "kagaz-pdf.jar",
           "jre/**/*"
         ]
+      },
+      {
+        "from": "shims/",
+        "to": "server/shims/"
       }
     ],
     "win": {

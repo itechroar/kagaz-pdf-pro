@@ -4,6 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { serverEnv } = require('./tools');
 
 /** Asks the OS for a free loopback port. */
 function freePort() {
@@ -77,7 +78,7 @@ async function startServer({ serverDir, dataDir }) {
   const logFd = fs.openSync(logPath, 'w');
   const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir }), {
     cwd: dataDir,
-    env: { ...process.env },
+    env: serverEnv(process.platform, process.env, serverDir),
     stdio: ['ignore', logFd, logFd],
     windowsHide: true,
   });

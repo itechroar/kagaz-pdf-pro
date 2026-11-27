@@ -2,7 +2,7 @@
     <string name="setup_title">अपने सर्वर से जुड़ें</string>
     <string name="setup_subtitle">शुरू करने के लिए अपने Kagaz PDF सर्वर का पता दर्ज करें।</string>
     <string name="server_label">सर्वर का पता</string>
-    <string name="server_helper">इंटरनेट वाले सर्वर के लिए https इस्तेमाल करें। सादा http केवल आपके अपने नेटवर्क पर चलता है।</string>
+    <string name="server_helper">यह ऐप आपके चलाए Kagaz PDF सर्वर से जुड़ता है, जैसे आपके कंप्यूटर पर (उसका Wi-Fi पता, जैसे 192.168.1.5:8080)। इंटरनेट वाले सर्वर के लिए https इस्तेमाल करें।</string>
     <string name="connect">जुड़ें</string>
     <string name="bad_url">सही पता दर्ज करें। सादा http केवल लोकल या निजी नेटवर्क के सर्वर के लिए मान्य है।</string>
     <string name="err_unreachable">इस सर्वर तक नहीं पहुँच सके। पता और इंटरनेट कनेक्शन जाँचें।</string>
