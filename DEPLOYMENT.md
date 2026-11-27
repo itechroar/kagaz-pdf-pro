@@ -1,3 +1,8 @@
+## Quick start (Docker)
+
+Run `./setup.sh` (Windows: double-click `setup.bat`). It pulls or builds the image, creates `.env` with a
+generated admin password on first run, starts the server and opens http://localhost:8080.
+
 # Deploying Kagaz PDF
 
 ## Docker (recommended, works online and offline)

@@ -42,3 +42,13 @@ test('waitForServer rejects on timeout', async () => {
   const p = await freePort();
   await assert.rejects(waitForServer(p, 300, 50), /did not start/);
 });
+
+test('logTail returns the end of the log and tolerates a missing file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kagaz-log-'));
+  const file = path.join(dir, 'server.log');
+  fs.writeFileSync(file, 'a'.repeat(2000) + 'END');
+  const tail = require('../src/server').logTail(file, 10);
+  assert.equal(tail.endsWith('END'), true);
+  assert.equal(tail.length <= 10, true);
+  assert.equal(require('../src/server').logTail(path.join(dir, 'missing.log')), '');
+});

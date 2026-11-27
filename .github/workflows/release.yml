@@ -29,7 +29,18 @@ jobs:
         run: |
           mkdir -p desktop/resources
           cp "$(ls app/core/build/libs/*.jar | grep -v plain | head -1)" desktop/resources/kagaz-pdf.jar
-          jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.net.http,java.security.jgss,java.sql,java.xml,java.xml.crypto,jdk.unsupported,jdk.crypto.ec,java.instrument,java.compiler --strip-debug --no-header-files --no-man-pages --output desktop/resources/jre
+          jlink --add-modules ALL-MODULE-PATH --strip-debug --no-header-files --no-man-pages --output desktop/resources/jre
+      - name: Start the bundled server once (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/kagaz-data"
+          desktop/resources/jre/bin/java -Xmx1g -Dserver.port=18080 -Dserver.address=127.0.0.1 -Dkagaz.base-path="$RUNNER_TEMP/kagaz-data/" -jar desktop/resources/kagaz-pdf.jar > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fs http://127.0.0.1:18080/api/v1/info/status >/dev/null; then echo "bundled server is up"; exit 0; fi
+            sleep 3
+          done
+          tail -n 80 "$RUNNER_TEMP/server.log"
+          exit 1
       - name: Build installer
         shell: bash
         working-directory: desktop
@@ -76,6 +87,27 @@ jobs:
         with:
           name: android-release-apk
           path: android/app/build/outputs/apk/release/*.apk
+
+  docker:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        run: |
+          IMG=ghcr.io/${GITHUB_REPOSITORY,,}
+          docker build -f docker/base/Dockerfile -t kagaz-pdf-base:local .
+          docker build -f docker/embedded/Dockerfile --build-arg BASE_IMAGE=kagaz-pdf-base:local -t "$IMG:$GITHUB_REF_NAME" -t "$IMG:latest" .
+          docker push "$IMG:$GITHUB_REF_NAME"
+          docker push "$IMG:latest"
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

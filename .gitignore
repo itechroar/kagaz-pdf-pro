@@ -324,3 +324,6 @@ desktop/resources/jre/
 !gradle/wrapper/gradle-wrapper.jar
 !app/core/src/main/resources/static/pipeline/
 !app/core/src/main/resources/static/mobile-sign.html
+
+# The committed example config
+!.env.example

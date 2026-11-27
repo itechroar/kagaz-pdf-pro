@@ -24,6 +24,16 @@ function javaBinary(serverDir) {
   return fs.existsSync(bundled) ? bundled : 'java';
 }
 
+/** Last part of the server log, for showing why startup failed. */
+function logTail(logPath, maxChars = 1200) {
+  try {
+    const text = fs.readFileSync(logPath, 'utf8');
+    return text.slice(-maxChars).trim();
+  } catch {
+    return '';
+  }
+}
+
 function buildArgs({ jar, port, dataDir }) {
   return [
     '-Xmx1g',
@@ -36,7 +46,7 @@ function buildArgs({ jar, port, dataDir }) {
 }
 
 /** Resolves once GET /api/v1/info/status answers 200, rejects after timeoutMs. */
-function waitForServer(port, timeoutMs = 120000, intervalMs = 500, isCancelled = () => false) {
+function waitForServer(port, timeoutMs = 240000, intervalMs = 500, isCancelled = () => false) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const attempt = () => {
@@ -62,19 +72,30 @@ async function startServer({ serverDir, dataDir }) {
   if (!fs.existsSync(jar)) throw new Error(`Server jar not found: ${jar}`);
   fs.mkdirSync(dataDir, { recursive: true });
   const port = await freePort();
+  const logPath = path.join(dataDir, 'server.log');
+  const logFd = fs.openSync(logPath, 'w');
   const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir }), {
     cwd: dataDir,
     env: { ...process.env },
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
     windowsHide: true,
   });
+  const withLog = (message) => {
+    const tail = logTail(logPath);
+    return `${message}\n\nLog file: ${logPath}${tail ? `\n\n${tail}` : ''}`;
+  };
   let dead = false;
   const exited = new Promise((_, reject) => {
-    child.once('exit', (code) => { dead = true; reject(new Error(`Server exited early (code ${code}). Is Java 25 installed?`)); });
-    child.once('error', (e) => { dead = true; reject(new Error(`Cannot start Java: ${e.message}. Install Java 25 or bundle a JRE.`)); });
+    child.once('exit', (code) => { dead = true; reject(new Error(withLog(`Server exited early (code ${code}).`))); });
+    child.once('error', (e) => { dead = true; reject(new Error(withLog(`Cannot start Java: ${e.message}.`))); });
   });
-  await Promise.race([waitForServer(port, 120000, 500, () => dead), exited]);
+  try {
+    await Promise.race([waitForServer(port, 240000, 500, () => dead), exited]);
+  } catch (e) {
+    child.kill();
+    throw e.message.includes('Log file:') ? e : new Error(withLog(e.message));
+  }
   return { port, stop: () => child.kill() };
 }
 
-module.exports = { freePort, javaBinary, buildArgs, waitForServer, startServer };
+module.exports = { freePort, javaBinary, buildArgs, waitForServer, startServer, logTail };
