@@ -29,13 +29,24 @@ test('buildArgs binds to loopback on the chosen port', () => {
   assert.deepStrictEqual(a.slice(-2), ['-jar', '/x/kagaz-pdf.jar']);
 });
 
-test('waitForServer resolves once the status endpoint answers 200', async () => {
+test('waitForServer resolves once the server answers below 500', async () => {
   let hits = 0;
   const srv = http.createServer((req, res) => { res.statusCode = ++hits < 3 ? 503 : 200; res.end(); });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   await waitForServer(srv.address().port, 5000, 20);
   assert.ok(hits >= 3);
   srv.close();
+});
+
+test('waitForServer accepts a login-protected server answering 401', async () => {
+  const srv = http.createServer((req, res) => { res.statusCode = 401; res.end(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await waitForServer(srv.address().port, 2000, 20);
+  srv.close();
+});
+
+test('buildArgs turns login off for the loopback-only desktop server', () => {
+  assert.ok(buildArgs({ jar: '/x/k.jar', port: 1, dataDir: '/d' }).includes('-Dsecurity.enableLogin=false'));
 });
 
 test('waitForServer rejects on timeout', async () => {

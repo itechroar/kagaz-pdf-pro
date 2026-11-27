@@ -34,9 +34,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p "$RUNNER_TEMP/kagaz-data"
-          desktop/resources/jre/bin/java -Xmx1g -Dserver.port=18080 -Dserver.address=127.0.0.1 -Dkagaz.base-path="$RUNNER_TEMP/kagaz-data/" -jar desktop/resources/kagaz-pdf.jar > "$RUNNER_TEMP/server.log" 2>&1 &
+          desktop/resources/jre/bin/java -Xmx1g -Dserver.port=18080 -Dserver.address=127.0.0.1 -Dsecurity.enableLogin=false -Dkagaz.base-path="$RUNNER_TEMP/kagaz-data/" -jar desktop/resources/kagaz-pdf.jar > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 90); do
-            if curl -fs http://127.0.0.1:18080/api/v1/info/status >/dev/null; then echo "bundled server is up"; exit 0; fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/v1/info/status || true)
+            if [ "$code" -ge 100 ] && [ "$code" -lt 500 ]; then echo "bundled server is up (HTTP $code)"; exit 0; fi
             sleep 3
           done
           tail -n 80 "$RUNNER_TEMP/server.log"

@@ -39,20 +39,21 @@ function buildArgs({ jar, port, dataDir }) {
     '-Xmx1g',
     `-Dserver.port=${port}`,
     '-Dserver.address=127.0.0.1',
+    '-Dsecurity.enableLogin=false',
     `-Dkagaz.base-path=${dataDir}${path.sep}`,
     '-jar',
     jar,
   ];
 }
 
-/** Resolves once GET /api/v1/info/status answers 200, rejects after timeoutMs. */
+/** Resolves once the server answers any HTTP status below 500 (a login-protected server answers 401), rejects after timeoutMs. */
 function waitForServer(port, timeoutMs = 240000, intervalMs = 500, isCancelled = () => false) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const attempt = () => {
       const req = http.get({ host: '127.0.0.1', port, path: '/api/v1/info/status', timeout: 2000 }, (res) => {
         res.resume();
-        if (res.statusCode === 200) return resolve();
+        if (res.statusCode < 500) return resolve();
         retry();
       });
       req.on('error', retry);
