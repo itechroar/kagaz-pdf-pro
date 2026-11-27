@@ -3,6 +3,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to attach the files to (leave empty to only build)'
+        required: false
+        default: ''
 
 jobs:
   installers:
@@ -98,7 +103,7 @@ jobs:
           path: android/app/build/outputs/apk/release/*.apk
 
   docker:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,13 +118,14 @@ jobs:
       - name: Build and push image
         run: |
           IMG=ghcr.io/${GITHUB_REPOSITORY,,}
+          TAG='${{ inputs.tag || github.ref_name }}'
           docker build -f docker/base/Dockerfile -t kagaz-pdf-base:local .
-          docker build -f docker/embedded/Dockerfile --build-arg BASE_IMAGE=kagaz-pdf-base:local -t "$IMG:$GITHUB_REF_NAME" -t "$IMG:latest" .
-          docker push "$IMG:$GITHUB_REF_NAME"
+          docker build -f docker/embedded/Dockerfile --build-arg BASE_IMAGE=kagaz-pdf-base:local -t "$IMG:$TAG" -t "$IMG:latest" .
+          docker push "$IMG:$TAG"
           docker push "$IMG:latest"
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     needs: [installers, android]
     runs-on: ubuntu-latest
     permissions:
@@ -130,4 +136,5 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/**/*

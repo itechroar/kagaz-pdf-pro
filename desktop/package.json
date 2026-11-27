@@ -1,6 +1,6 @@
 {
   "name": "kagaz-pdf-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Desktop shell for Kagaz PDF: runs the bundled server locally and shows it in a window",
   "license": "Apache-2.0",
   "main": "src/main.js",
