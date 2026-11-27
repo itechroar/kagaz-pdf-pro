@@ -23,7 +23,7 @@ jobs:
           node-version: 22
       - name: Build server jar
         shell: bash
-        run: ./gradlew :kagaz-pdf:bootJar -x test
+        run: ./gradlew :kagaz-pdf:bootJar -PbuildWithFrontend=true -x test -x spotlessApply -x spotlessCheck
       - name: Stage server and bundled JRE
         shell: bash
         run: |
@@ -37,7 +37,11 @@ jobs:
           desktop/resources/jre/bin/java -Xmx1g -Dserver.port=18080 -Dserver.address=127.0.0.1 -Dsecurity.enableLogin=false -Dkagaz.base-path="$RUNNER_TEMP/kagaz-data/" -jar desktop/resources/kagaz-pdf.jar > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/v1/info/status || true)
-            if [ "$code" -ge 100 ] && [ "$code" -lt 500 ]; then echo "bundled server is up (HTTP $code)"; exit 0; fi
+            if [ "$code" -ge 100 ] && [ "$code" -lt 500 ]; then
+              echo "bundled server is up (HTTP $code)"
+              if curl -s http://127.0.0.1:18080/ | grep -qi "API-only mode"; then echo "jar was built without the web interface"; exit 1; fi
+              exit 0
+            fi
             sleep 3
           done
           tail -n 80 "$RUNNER_TEMP/server.log"
