@@ -21,6 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: go-task/setup-task@v1
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build server jar
         shell: bash
         run: ./gradlew :kagaz-pdf:bootJar -PbuildWithFrontend=true -x test -x spotlessApply -x spotlessCheck
