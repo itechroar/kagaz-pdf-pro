@@ -29,7 +29,7 @@ jobs:
         run: |
           mkdir -p desktop/resources
           cp "$(ls app/core/build/libs/*.jar | grep -v plain | head -1)" desktop/resources/kagaz-pdf.jar
-          jlink --module-path "$JAVA_HOME/jmods" --add-modules ALL-MODULE-PATH --strip-debug --no-header-files --no-man-pages --output desktop/resources/jre
+          jlink --add-modules "$(java --list-modules | cut -d@ -f1 | paste -sd, -)" --strip-debug --no-header-files --no-man-pages --output desktop/resources/jre
       - name: Start the bundled server once (Linux)
         if: runner.os == 'Linux'
         run: |
