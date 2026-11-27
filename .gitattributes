@@ -8,3 +8,6 @@ app/core/src/main/resources/static/css/bootstrap.min.css linguist-vendored
 app/core/src/main/resources/static/css/fonts/* linguist-vendored
 
 frontend/src/editor/core/tests/test-fixtures/signature-*.pdf binary
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
