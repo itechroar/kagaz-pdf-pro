@@ -1,6 +1,6 @@
 {
   "name": "kagaz-pdf-admin",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Administrator console for Kagaz PDF: dashboard, user and tool management, and the full user app in one desktop window",
   "license": "Apache-2.0",
   "main": "src/main.js",
