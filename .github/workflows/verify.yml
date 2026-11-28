@@ -46,7 +46,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: ./gradlew build -x spotlessCheck --stacktrace
 
   smoke:
@@ -57,7 +57,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Build the server jar
         run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
       - name: Start the server with login enabled
@@ -93,7 +93,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
       - name: Start a mock identity provider and the server
         env:
@@ -130,7 +130,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
       - name: Start the server with a separate administrator site
         env:
@@ -168,7 +168,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: ./gradlew :kagaz-pdf:bootJar -x test -x spotlessCheck
       - name: Start a mock model server and the app
         env:
@@ -235,7 +235,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: 8.9
       - run: gradle -p android :app:testUserDebugUnitTest :app:testAdminDebugUnitTest :app:assembleDebug
