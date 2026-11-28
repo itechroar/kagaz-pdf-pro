@@ -19,4 +19,9 @@ class ServerUrlTest {
         assertEquals("https://pdf.example.com/admin-dashboard.html", ServerUrl.start("https://pdf.example.com/", "/admin-dashboard.html"))
         assertEquals("http://192.168.1.5:8081/", ServerUrl.start("http://192.168.1.5:8081", "/"))
     }
+    @Test fun builtInUsedOnlyWhenAcceptable() {
+        assertEquals("https://pdf.example.com", ServerUrl.builtIn("https://pdf.example.com/"))
+        assertNull(ServerUrl.builtIn(""))
+        assertNull(ServerUrl.builtIn("http://pdf.example.com"))
+    }
 }

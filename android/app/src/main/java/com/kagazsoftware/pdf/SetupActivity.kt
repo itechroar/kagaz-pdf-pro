@@ -22,6 +22,11 @@ class SetupActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val changing = intent.getBooleanExtra(EXTRA_CHANGE, false)
+        val builtIn = ServerUrl.builtIn(BuildConfig.DEFAULT_SERVER)
+        if (prefs.getString(KEY_SERVER, null) == null && builtIn != null && !changing) {
+            prefs.edit().putString(KEY_SERVER, builtIn).apply()
+        }
         val saved = prefs.getString(KEY_SERVER, null)
         if (saved != null && !intent.getBooleanExtra(EXTRA_CHANGE, false)) {
             startActivity(Intent(this, MainActivity::class.java)); finish(); return
@@ -32,7 +37,8 @@ class SetupActivity : AppCompatActivity() {
         val input = findViewById<EditText>(R.id.serverUrl)
         val button = findViewById<MaterialButton>(R.id.connect)
         val checking = findViewById<LinearProgressIndicator>(R.id.checking)
-        saved?.let { input.setText(it) }
+        val linked = intent.data?.takeIf { it.scheme == "kagazpdf" }?.getQueryParameter("server")
+        (linked ?: saved)?.let { input.setText(it) }
 
         fun connect() {
             layout.error = null

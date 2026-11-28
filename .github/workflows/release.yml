@@ -104,6 +104,8 @@ jobs:
           KAGAZ_KEYSTORE_PASSWORD: ${{ secrets.KAGAZ_KEYSTORE_PASSWORD }}
           KAGAZ_KEY_ALIAS: ${{ secrets.KAGAZ_KEY_ALIAS }}
           KAGAZ_KEY_PASSWORD: ${{ secrets.KAGAZ_KEY_PASSWORD }}
+          KAGAZ_DEFAULT_SERVER: ${{ vars.KAGAZ_DEFAULT_SERVER }}
+          KAGAZ_ADMIN_DEFAULT_SERVER: ${{ vars.KAGAZ_ADMIN_DEFAULT_SERVER }}
         run: |
           if [ -n "$KAGAZ_KEYSTORE_B64" ]; then export KAGAZ_KEYSTORE_FILE="$RUNNER_TEMP/kagaz.jks"; fi
           gradle -p android :app:assembleRelease

@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
 }
+// Address built into the app so people are not asked for one; empty means ask. Validated again at runtime.
+def defaultServer(String name) {
+    def v = (System.getenv(name) ?: '').trim()
+    return v.contains('"') || v.contains('\\') ? '""' : '"' + v + '"'
+}
+
 android {
     namespace 'com.kagazsoftware.pdf'
     compileSdk 35
@@ -31,6 +37,7 @@ android {
             dimension 'role'
             resValue 'string', 'app_name', 'Kagaz PDF'
             buildConfigField 'String', 'START_PATH', '"/"'
+            buildConfigField 'String', 'DEFAULT_SERVER', defaultServer('KAGAZ_DEFAULT_SERVER')
         }
         admin {
             dimension 'role'
@@ -38,6 +45,7 @@ android {
             versionNameSuffix '-admin'
             resValue 'string', 'app_name', 'Kagaz PDF Admin'
             buildConfigField 'String', 'START_PATH', '"/admin-dashboard.html"'
+            buildConfigField 'String', 'DEFAULT_SERVER', defaultServer('KAGAZ_ADMIN_DEFAULT_SERVER')
         }
     }
     buildTypes {

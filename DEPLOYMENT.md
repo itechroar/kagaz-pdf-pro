@@ -55,6 +55,14 @@ The desktop apps can run their own server on the computer or connect to a hosted
 credentials work on every device. Everything also works offline: the server, the desktop apps and the Android apps only
 need a network path to the server you chose, which can be this computer or your own LAN.
 
+### Android apps without the address prompt
+
+The phone apps need a server, so on first start they ask for its address. To ship apps that skip that step, set two
+repository variables before publishing a release (Settings, Secrets and variables, Actions, Variables):
+`KAGAZ_DEFAULT_SERVER` (user site, e.g. `https://pdf.example.com`) and `KAGAZ_ADMIN_DEFAULT_SERVER` (administrator
+site). They must be https unless they point at a private network. People can still change the server from the app menu,
+and a link such as `kagazpdf://connect?server=https://pdf.example.com` pre-fills the address.
+
 ## Without Docker
 
 Needs JDK 25: `./gradlew bootJar -PbuildWithFrontend=true`, then

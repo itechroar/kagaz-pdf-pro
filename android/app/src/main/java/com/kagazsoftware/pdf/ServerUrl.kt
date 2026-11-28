@@ -20,6 +20,9 @@ object ServerUrl {
         }
     }
 
+    /** The address built into this app variant, or null when none was set or it is not acceptable. */
+    fun builtIn(configured: String): String? = if (configured.isBlank()) null else normalize(configured)
+
     /** The page this app variant opens first: the user app opens the tools, the admin app the console. */
     fun start(server: String, path: String): String = server.trimEnd('/') + path
 
