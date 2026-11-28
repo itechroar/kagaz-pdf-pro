@@ -14,7 +14,7 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.arg
 [ "$(code $U/login.html)" = 200 ] || fail "user site sign-in page"
 [ "$(code $A/login.html)" = 200 ] || fail "admin site sign-in page"
 
-loc=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' $U/)
+loc=$(curl -s -H 'Accept: text/html' -o /dev/null -w '%{http_code} %{redirect_url}' $U/)
 case "$loc" in 302*login.html*) ;; *) fail "unauthenticated visit must redirect to sign-in, got: $loc";; esac
 
 [ "$(curl -s $U/api/v1/auth/status | json "d['signup'] and not d['adminSite']")" = True ] || fail "user site status"
@@ -28,8 +28,8 @@ curl -s -c $TMP/admin -H 'Content-Type: application/json' -d "{\"username\":\"ad
 [ "$(code -H 'Content-Type: application/json' -d '{"username":"smokeuser","password":"smoke-user-pass-1"}' $U/api/v1/auth/signup)" = 201 ] || fail "sign-up"
 [ "$(code -H 'Content-Type: application/json' -d '{"username":"smokeuser","password":"smoke-user-pass-1"}' $A/api/v1/auth/signup)" = 404 ] || fail "no sign-up on the admin site"
 curl -s -c $TMP/user -H 'Content-Type: application/json' -d '{"username":"smokeuser","password":"smoke-user-pass-1"}' $U/api/v1/auth/login >/dev/null
-[ "$(code -b $TMP/user $U/)" = 200 ] || fail "user reaches the tools"
-[ "$(code -b $TMP/user $A/)" = 403 ] || fail "user must be refused on the admin site"
+[ "$(code -b $TMP/user -H "Accept: text/html" $U/)" = 200 ] || fail "user reaches the tools"
+[ "$(code -b $TMP/user -H "Accept: text/html" $A/)" = 403 ] || fail "user must be refused on the admin site"
 
 sleep 1
 [ "$(curl -s -b $TMP/admin $A/api/v1/auth/admin/activity | json "d['totals']['signups']>=1 and d['totals']['loginsOk']>=2")" = True ] || fail "dashboard did not record the sign-up and sign-ins"
