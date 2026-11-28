@@ -5,12 +5,17 @@ services:
     # Build once with ./scripts/build-docker.sh (or push the image to a registry and name it here).
     image: kagaz-pdf:local
     ports:
-      - "8080:8080"
+      # User site: what everyone signs in to.
+      - "${KAGAZ_USER_PORT:-8080}:8080"
+      # Administrator site: its own address; reachable from this computer only unless you open it.
+      - "${KAGAZ_ADMIN_HOST_BIND:-127.0.0.1}:${KAGAZ_ADMIN_HOST_PORT:-8081}:8081"
     env_file:
       - path: .env
         required: false
     environment:
       SECURITY_ENABLELOGIN: ${SECURITY_ENABLELOGIN:-true}
+      KAGAZ_ADMIN_PORT: "8081"
+      KAGAZ_AUTH_SIGNUP_ENABLED: ${KAGAZ_AUTH_SIGNUP_ENABLED:-true}
     volumes:
       - kagaz-data:/configs
       - kagaz-logs:/logs

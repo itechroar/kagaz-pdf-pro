@@ -15,4 +15,8 @@ class ServerUrlTest {
     @Test fun lookalikeHostRejected() = assertFalse(ServerUrl.sameOrigin("https://pdf.example.com", "https://pdf.example.com.evil.com/"))
     @Test fun otherPortRejected() = assertFalse(ServerUrl.sameOrigin("http://192.168.1.5:8080", "http://192.168.1.5:9090/"))
     @Test fun schemeDowngradeRejected() = assertFalse(ServerUrl.sameOrigin("https://pdf.example.com", "http://pdf.example.com/"))
+    @Test fun startJoinsServerAndPath() {
+        assertEquals("https://pdf.example.com/admin-dashboard.html", ServerUrl.start("https://pdf.example.com/", "/admin-dashboard.html"))
+        assertEquals("http://192.168.1.5:8081/", ServerUrl.start("http://192.168.1.5:8081", "/"))
+    }
 }

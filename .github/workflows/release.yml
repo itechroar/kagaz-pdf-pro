@@ -107,12 +107,13 @@ jobs:
         run: |
           if [ -n "$KAGAZ_KEYSTORE_B64" ]; then export KAGAZ_KEYSTORE_FILE="$RUNNER_TEMP/kagaz.jks"; fi
           gradle -p android :app:assembleRelease
-          cp android/app/build/outputs/apk/release/app-release*.apk android/app/build/outputs/apk/release/KagazPDF-android.apk
-          rm -f android/app/build/outputs/apk/release/app-release*.apk
+          mkdir -p android/dist
+          cp android/app/build/outputs/apk/user/release/app-user-release*.apk android/dist/KagazPDF-android.apk
+          cp android/app/build/outputs/apk/admin/release/app-admin-release*.apk android/dist/KagazPDFAdmin-android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: android-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: android/dist/*.apk
 
   docker:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''

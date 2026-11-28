@@ -20,6 +20,9 @@ object ServerUrl {
         }
     }
 
+    /** The page this app variant opens first: the user app opens the tools, the admin app the console. */
+    fun start(server: String, path: String): String = server.trimEnd('/') + path
+
     fun isPrivateHost(host: String): Boolean {
         val h = host.lowercase()
         if (h == "localhost" || h == "10.0.2.2" || h.endsWith(".local")) return true

@@ -28,15 +28,22 @@
 <section id="download"><div class="wrap"><h2>Download</h2>
 <div class="grid">
 <div class="card"><h3>Windows, macOS, Linux</h3><p>Desktop app with the server bundled. OCR, cleanup and repair need helper programs; the app offers to install them.</p><p><a data-dl="desktop" href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the installer</a></p></div>
-<div class="card"><h3>Android</h3><p>A client for your own Kagaz PDF server. In the desktop app choose Phone, then Use with phone, and enter the address it shows.</p><p><a data-dl="android" href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the APK</a></p></div>
+<div class="card"><h3>Android</h3><p>Sign in with your account. It connects to your Kagaz PDF server: the address of the user site, or your own computer via the desktop app's Phone menu.</p><p><a data-dl="android" href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the APK</a></p></div>
 <div class="card"><h3>Docker</h3><p>Includes every helper tool (OCR, cleanup, repair). Run <code>setup.sh</code> or <code>setup.bat</code>.</p></div>
+</div>
+<h3 style="margin-top:2rem">For administrators</h3>
+<p>The administrator site is separate from the user site and only administrators can sign in to it: live sign-ins and tool use, users, tool switches, audit log, plus every user feature.</p>
+<div class="grid">
+<div class="card"><h3>Admin desktop app</h3><p>Windows, macOS and Linux. Run a private server on this computer or connect to yours.</p><p><a data-dl="admin-desktop" href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the admin installer</a></p></div>
+<div class="card"><h3>Admin Android app</h3><p>The console on your phone, for your own server.</p><p><a data-dl="admin-android" href="https://github.com/itechroar/kagaz-pdf-pro/releases/latest">Get the admin APK</a></p></div>
+<div class="card"><h3>Admin setup</h3><p>Run <code>setup-admin.sh</code> or <code>setup-admin.bat</code> to start the server and open the administrator site.</p></div>
 </div></div></section>
 <section id="deploy"><div class="wrap"><h2>Self-host in a minute</h2>
 <pre><code>git clone https://github.com/itechroar/kagaz-pdf-pro
 cd kagaz-pdf-pro
 cp .env.example .env     # set KAGAZ_AUTH_ADMIN_PASSWORD
 docker compose up -d</code></pre>
-<p>Then open <code>http://localhost:8080</code>. See the deployment guide in the repository for HTTPS, SSO, AI keys and offline setups.</p>
+<p>Users open <code>http://localhost:8080</code> and sign in or create an account; administrators use the separate site at <code>http://localhost:8081</code>. See the deployment guide in the repository for HTTPS, SSO, AI keys and offline setups.</p>
 </div></section>
 </main>
 <footer><div class="wrap">Kagaz PDF Pro, licensed under Apache-2.0. Includes MIT-licensed open-source components; see NOTICE in the repository.</div></footer>

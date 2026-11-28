@@ -18,6 +18,43 @@ Data (users, audit log, settings) is in the `kagaz-data` volume at `/configs`. B
 Put a TLS reverse proxy (Caddy, nginx, Traefik) in front for internet use; the session cookie and
 SSO callback should be served over HTTPS. Set `KAGAZ_AUTH_PUBLIC_URL` to that public address.
 
+## Two sites: users and administrators
+
+One server, two separate sites that share accounts and data:
+
+| Site | Default address | Who | What |
+|---|---|---|---|
+| User site | `http://localhost:8080` | everyone | Sign in or create an account, then every PDF tool |
+| Administrator site | `http://localhost:8081` | administrators only | Live dashboard, users, tools, audit log, and every user feature |
+
+- Nobody uses anything without signing in. With `KAGAZ_AUTH_SIGNUP_ENABLED=true` (the Docker default) anyone can
+  create a plain user account on the user site; accounts are never made administrators that way.
+- The user site answers 404 for every administrator address. The administrator site refuses non-administrators.
+- The administrator site is published to this computer only. To reach it from other devices run
+  `./setup-admin.sh --network` (Windows: `setup-admin.ps1 -Network`) and keep it behind a firewall or VPN, or put it on
+  its own hostname behind your reverse proxy with access limits.
+- Without Docker set `kagaz.admin-port=8081` (or `KAGAZ_ADMIN_PORT`) to get the same split; leave it unset for a single site.
+
+### Sign-in options
+
+1. Username and password (with account creation on the user site).
+2. Single sign-on through any OpenID Connect provider (Google, Microsoft, Okta, Keycloak, Auth0 ...); set the
+   `KAGAZ_AUTH_OIDC_*` values in `.env`. The button appears on the sign-in page.
+3. API keys for scripts.
+
+### Apps, all of which require sign-in
+
+| | User | Administrator |
+|---|---|---|
+| Website | user site | administrator site |
+| Windows / Mac / Linux | `KagazPDF-<version>-<os>` | `KagazPDFAdmin-<version>-<os>` |
+| Android | `KagazPDF-android.apk` | `KagazPDFAdmin-android.apk` |
+| Setup | `setup.sh` / `setup.bat` | `setup-admin.sh` / `setup-admin.bat` |
+
+The desktop apps can run their own server on the computer or connect to a hosted one (menu Account / Server), so the same
+credentials work on every device. Everything also works offline: the server, the desktop apps and the Android apps only
+need a network path to the server you chose, which can be this computer or your own LAN.
+
 ## Without Docker
 
 Needs JDK 25: `./gradlew bootJar -PbuildWithFrontend=true`, then

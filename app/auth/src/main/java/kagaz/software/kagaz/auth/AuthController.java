@@ -59,6 +59,8 @@ public class AuthController {
     @org.springframework.beans.factory.annotation.Value("${kagaz.auth.signup.enabled:false}")
     private boolean signupEnabled;
 
+    @org.springframework.beans.factory.annotation.Autowired private SiteMode site;
+
     private final UserStore store;
     private final LoginLimiter limiter;
     private final ApplicationEventPublisher events;
@@ -82,19 +84,18 @@ public class AuthController {
     }
 
     @GetMapping("/status")
-    public Map<String, Object> status() {
+    public Map<String, Object> status(HttpServletRequest request) {
         OidcService sso = oidc.getIfAvailable();
-        return sso == null
-                ? Map.of("loginEnabled", true, "sso", false, "signup", signupEnabled)
-                : Map.of(
-                        "loginEnabled",
-                        true,
-                        "sso",
-                        true,
-                        "ssoLabel",
-                        sso.label(),
-                        "signup",
-                        signupEnabled);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("loginEnabled", true);
+        out.put("sso", sso != null);
+        if (sso != null) {
+            out.put("ssoLabel", sso.label());
+        }
+        out.put("signup", signupEnabled && !site.isAdminSite(request));
+        out.put("adminSite", site.isAdminSite(request));
+        out.put("adminConsole", site.hasAdminConsole(request));
+        return out;
     }
 
     @PostMapping("/login")

@@ -1,5 +1,4 @@
 <resources>
-    <string name="app_name">Kagaz PDF</string>
     <string name="setup_title">Connect to your server</string>
     <string name="setup_subtitle">Enter the address of your Kagaz PDF server to get started.</string>
     <string name="server_label">Server address</string>

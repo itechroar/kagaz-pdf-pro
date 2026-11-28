@@ -30,7 +30,9 @@ echo "Waiting for the server to start..."
 for _ in $(seq 1 120); do
   if curl -fs http://localhost:8080/login.html >/dev/null 2>&1; then
     echo
-    echo "Kagaz PDF is running: http://localhost:8080"
+    echo "Kagaz PDF is running."
+    echo "  Users (sign in or create an account): http://localhost:8080"
+    echo "  Administrators (separate site):       http://localhost:8081   -> run ./setup-admin.sh for the admin tools"
     LAN_IP=$( (ipconfig getifaddr en0 || ipconfig getifaddr en1 || ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}') 2>/dev/null | head -1 || true)
     if [ -n "${LAN_IP:-}" ]; then echo "For the Android app on the same Wi-Fi, enter: $LAN_IP:8080"; fi
     if [ -n "$NEW_PASSWORD" ]; then

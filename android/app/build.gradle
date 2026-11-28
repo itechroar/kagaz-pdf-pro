@@ -24,6 +24,22 @@ android {
             }
         }
     }
+    buildFeatures { buildConfig true }
+    flavorDimensions 'role'
+    productFlavors {
+        user {
+            dimension 'role'
+            resValue 'string', 'app_name', 'Kagaz PDF'
+            buildConfigField 'String', 'START_PATH', '"/"'
+        }
+        admin {
+            dimension 'role'
+            applicationIdSuffix '.admin'
+            versionNameSuffix '-admin'
+            resValue 'string', 'app_name', 'Kagaz PDF Admin'
+            buildConfigField 'String', 'START_PATH', '"/admin-dashboard.html"'
+        }
+    }
     buildTypes {
         release {
             signingConfig System.getenv('KAGAZ_KEYSTORE_FILE') ? signingConfigs.release : signingConfigs.debug

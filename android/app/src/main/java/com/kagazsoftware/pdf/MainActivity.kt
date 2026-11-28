@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity() {
                 if (web.canGoBack()) web.goBack() else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
             }
         })
-        if (savedInstanceState == null) web.loadUrl(server) else web.restoreState(savedInstanceState)
+        if (savedInstanceState == null) web.loadUrl(ServerUrl.start(server, BuildConfig.START_PATH)) else web.restoreState(savedInstanceState)
     }
 
     private fun showError(message: String) {
@@ -156,7 +156,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun reload() {
         errorView.visibility = View.GONE
-        if (web.url == null || loadFailed) web.loadUrl(server) else web.reload()
+        if (web.url == null || loadFailed) web.loadUrl(ServerUrl.start(server, BuildConfig.START_PATH)) else web.reload()
     }
 
     private fun openSetup() {

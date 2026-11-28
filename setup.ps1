@@ -32,7 +32,9 @@ for ($i = 0; $i -lt 120; $i++) {
   try {
     Invoke-WebRequest -UseBasicParsing http://localhost:8080/login.html | Out-Null
     Write-Host ''
-    Write-Host 'Kagaz PDF is running: http://localhost:8080'
+    Write-Host 'Kagaz PDF is running.'
+    Write-Host '  Users (sign in or create an account): http://localhost:8080'
+    Write-Host '  Administrators (separate site):       http://localhost:8081   (run setup-admin.bat for the admin tools)'
     $lan = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress
     if ($lan) { Write-Host "For the Android app on the same Wi-Fi, enter: ${lan}:8080 (allow Docker through the Windows firewall if asked)" }
     if ($newPassword) { Write-Host "Sign in as: admin    Password: $newPassword    (saved in .env, change it after signing in)" }

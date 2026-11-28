@@ -21,7 +21,9 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/api/v1/auth")
-@ConditionalOnProperty(name = "kagaz.auth.signup.enabled", havingValue = "true")
+@ConditionalOnProperty(
+        name = {"kagaz.auth.signup.enabled", "security.enableLogin"},
+        havingValue = "true")
 public class SignupController {
 
     public record SignupRequest(String username, String password) {}
@@ -31,9 +33,14 @@ public class SignupController {
     private final UserStore store;
     private final LoginLimiter limiter;
     private final ApplicationEventPublisher events;
+    private final SiteMode site;
 
     public SignupController(
-            UserStore store, LoginLimiter limiter, ApplicationEventPublisher events) {
+            UserStore store,
+            LoginLimiter limiter,
+            ApplicationEventPublisher events,
+            SiteMode site) {
+        this.site = site;
         this.store = store;
         this.limiter = limiter;
         this.events = events;
@@ -42,6 +49,9 @@ public class SignupController {
     @PostMapping("/signup")
     public ResponseEntity<?> signup(
             @RequestBody(required = false) SignupRequest body, HttpServletRequest request) {
+        if (site.isAdminSite(request)) {
+            return error(HttpStatus.NOT_FOUND, "not_found", "Not found");
+        }
         String ip = request.getRemoteAddr();
         if (body == null || body.username() == null || body.password() == null) {
             return error(HttpStatus.BAD_REQUEST, "bad_request", "Username and password required");

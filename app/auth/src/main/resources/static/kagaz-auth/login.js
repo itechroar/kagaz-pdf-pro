@@ -3,6 +3,7 @@
   var cp = document.getElementById('cp'), go = document.getElementById('go');
   var step = 'login';
   var signup = false;
+  var consoleHere = true;
   function post(url, body) {
     return fetch(url, {method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
@@ -38,7 +39,7 @@
       if (!r.ok) { msg.textContent = r.body.message || 'Sign-in failed'; return; }
       if (r.body.mustChangePassword) { needChange(); return; }
       var wanted = new URLSearchParams(location.search).get('next');
-      location.href = wanted ? next() : (r.body.role === 'ADMIN' ? '/admin-dashboard.html' : '/');
+      location.href = wanted ? next() : (r.body.role === 'ADMIN' && consoleHere ? '/admin-dashboard.html' : '/');
     });
   });
   function toggle(on) {
@@ -49,6 +50,7 @@
   }
   document.getElementById('tog').addEventListener('click', function () { toggle(!signup); });
   fetch('/api/v1/auth/status').then(function (r) { return r.json(); }).then(function (s) {
+    consoleHere = s.adminConsole !== false;
     if (s.signup) { document.getElementById('su').hidden = false; }
     if (s.sso) { var a = document.getElementById('sso'); a.hidden = false; a.firstChild.textContent = 'Sign in with ' + (s.ssoLabel || 'SSO'); }
   }).catch(function () {});
