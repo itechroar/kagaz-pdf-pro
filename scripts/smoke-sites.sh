@@ -13,6 +13,8 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.arg
 
 [ "$(code $U/login.html)" = 200 ] || fail "user site sign-in page"
 [ "$(code $A/login.html)" = 200 ] || fail "admin site sign-in page"
+[ "$(code $U/register.html)" = 200 ] || fail "user site registration page"
+[ "$(code $U/admin-user.html)" = 404 ] || fail "user site must hide the admin profile page"
 
 loc=$(curl -s -H 'Accept: text/html' -o /dev/null -w '%{http_code} %{redirect_url}' $U/)
 case "$loc" in 302*login.html*) ;; *) fail "unauthenticated visit must redirect to sign-in, got: $loc";; esac

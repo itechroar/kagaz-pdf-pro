@@ -34,6 +34,7 @@ public class AuthFilter extends OncePerRequestFilter {
     private static final Set<String> PUBLIC_EXACT =
             Set.of(
                     "/login.html",
+                    "/register.html",
                     "/api/v1/auth/login",
                     "/api/v1/auth/status",
                     "/api/v1/auth/signup",
@@ -97,6 +98,7 @@ public class AuthFilter extends OncePerRequestFilter {
                 || path.equals("/admin-audit.html")
                 || path.equals("/admin-features.html")
                 || path.equals("/admin-dashboard.html")
+                || path.equals("/admin-user.html")
                 || path.equals("/admin")
                 || path.startsWith("/api/v1/auth/admin/");
     }

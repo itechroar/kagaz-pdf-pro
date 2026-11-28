@@ -18,7 +18,7 @@
     rows.textContent = '';
     list.forEach(function (u) {
       var tr = document.createElement('tr'), name = encodeURIComponent(u.username);
-      cell(tr, u.username); cell(tr, u.role); cell(tr, u.enabled ? 'active' : 'disabled');
+      var link = document.createElement('a'); link.href = '/admin-user.html?u=' + name; link.textContent = u.username; cell(tr, '').appendChild(link); cell(tr, u.role); cell(tr, u.enabled ? 'active' : 'disabled');
       cell(tr, u.hasApiKey ? 'set' : '—');
       var act = document.createElement('td');
       act.appendChild(btn(u.enabled ? 'Disable' : 'Enable', function () {
@@ -41,9 +41,6 @@
     api('POST', '/api/v1/auth/admin/users', {username: document.getElementById('nu').value,
       password: document.getElementById('np').value, role: document.getElementById('nr').value, mustChangePassword: true})
       .then(function () { e.target.reset(); load(); }, fail);
-  });
-  document.getElementById('out').addEventListener('click', function (e) {
-    e.preventDefault(); api('POST', '/api/v1/auth/logout').then(function () { location.href = '/login.html'; }, fail);
   });
   load();
 })();

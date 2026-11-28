@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Create account · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main><div class="card">
+<h1>Create your Kagaz PDF account</h1>
+<form id="reg" autocomplete="on">
+<label for="u">Username</label><input id="u" autocomplete="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9_.@\-]{3,64}" autofocus>
+<div class="hint">3–64 letters, digits, and . _ @ -</div>
+<label for="p">Password</label><input id="p" type="password" autocomplete="new-password" required minlength="8">
+<label for="p2">Confirm password</label><input id="p2" type="password" autocomplete="new-password" required minlength="8">
+<button type="submit">Create account</button>
+<div class="err" id="msg" role="alert"></div>
+</form>
+<p class="hint" id="closed" hidden>Self-service sign-up is turned off here. Ask your administrator for an account.</p>
+<p class="hint">Already registered? <a href="/login.html">Sign in</a></p>
+</div></main>
+<script src="/kagaz-auth/register.js"></script></body></html>

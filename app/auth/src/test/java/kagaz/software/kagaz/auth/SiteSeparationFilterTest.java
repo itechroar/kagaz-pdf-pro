@@ -55,6 +55,7 @@ class SiteSeparationFilterTest {
         assertEquals(404, run(8081, 8080, "/admin-dashboard.html", admin, null).getStatus());
         assertEquals(404, run(8081, 8080, "/api/v1/auth/admin/activity", admin, null).getStatus());
         assertEquals(404, run(8081, 8080, "/admin", admin, null).getStatus());
+        assertEquals(404, run(8081, 8080, "/admin-user.html", admin, null).getStatus());
         assertEquals("yes", run(8081, 8080, "/", member, null).getHeader("X-Passed"));
     }
 

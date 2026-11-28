@@ -48,7 +48,7 @@
     document.getElementById('p').autocomplete = on ? 'new-password' : 'current-password';
     msg.textContent = '';
   }
-  document.getElementById('tog').addEventListener('click', function () { toggle(!signup); });
+  document.getElementById('tog').addEventListener('click', function () { location.href = '/register.html'; });
   fetch('/api/v1/auth/status').then(function (r) { return r.json(); }).then(function (s) {
     consoleHere = s.adminConsole !== false;
     if (s.signup) { document.getElementById('su').hidden = false; }
