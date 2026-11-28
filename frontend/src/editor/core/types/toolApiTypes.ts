@@ -823,6 +823,10 @@ export interface OptimizePdfRequest {
    */
   linearize?: boolean;
   /**
+   * Lowest optimization level to use when expectedOutputSize is set. The level chosen for the target is raised to at least this value, so a target that is easy to reach still gets the compression strength asked for. Ignored without expectedOutputSize.
+   */
+  minOptimizeLevel?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  /**
    * Whether to normalize the PDF content for better compatibility. Default is false.
    */
   normalize?: boolean;

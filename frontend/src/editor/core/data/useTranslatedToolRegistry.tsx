@@ -21,6 +21,7 @@ import { getSynonyms } from "@editor/utils/toolSynonyms";
 import { useProprietaryToolRegistry } from "@editor/data/useProprietaryToolRegistry";
 import { classifyOperationConfig } from "@editor/hooks/tools/classify/useClassifyOperation";
 import { compressOperationConfig } from "@editor/hooks/tools/compress/useCompressOperation";
+import { compressToSizeOperationConfig } from "@editor/hooks/tools/compressToSize/useCompressToSizeOperation";
 import { splitOperationConfig } from "@editor/hooks/tools/split/useSplitOperation";
 import { addPasswordOperationConfig } from "@editor/hooks/tools/addPassword/useAddPasswordOperation";
 import { removePasswordOperationConfig } from "@editor/hooks/tools/removePassword/useRemovePasswordOperation";
@@ -1192,6 +1193,27 @@ export function useTranslatedToolCatalog(): TranslatedToolCatalog {
           () => import("@editor/components/tools/compress/CompressSettings"),
         ),
         synonyms: getSynonyms(t, "compress"),
+      },
+      compressToSize: {
+        icon: <Icon name="shrink" size="1.5rem" />,
+        name: t("home.compressToSize.title", "Compress to size"),
+        component: lazy(() => import("@editor/tools/CompressToSize")),
+        description: t(
+          "home.compressToSize.desc",
+          "Shrink a PDF to a size you choose, in KB or MB.",
+        ),
+        categoryId: ToolCategoryId.RECOMMENDED_TOOLS,
+        subcategoryId: SubcategoryId.GENERAL,
+        maxFiles: -1,
+        endpoints: ["compress-pdf"],
+        operationConfig: asRegistryConfig(compressToSizeOperationConfig),
+        automationSettings: lazySettings(
+          () =>
+            import(
+              "@editor/components/tools/compressToSize/CompressToSizeSettings"
+            ),
+        ),
+        synonyms: getSynonyms(t, "compressToSize"),
       },
       convert: {
         icon: <Icon name="file-convert" size="1.5rem" />,

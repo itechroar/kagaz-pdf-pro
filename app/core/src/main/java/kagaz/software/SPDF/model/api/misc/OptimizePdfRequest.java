@@ -31,6 +31,16 @@ public class OptimizePdfRequest extends PDFFile {
     private String expectedOutputSize;
 
     @Schema(
+            description =
+                    "Lowest optimization level to use when expectedOutputSize is set. The level"
+                            + " chosen for the target is raised to at least this value, so a"
+                            + " target that is easy to reach still gets the compression strength"
+                            + " asked for. Ignored without expectedOutputSize.",
+            requiredMode = Schema.RequiredMode.NOT_REQUIRED,
+            allowableValues = {"1", "2", "3", "4", "5", "6", "7", "8", "9"})
+    private Integer minOptimizeLevel;
+
+    @Schema(
             description = "Whether to linearize the PDF for faster web viewing. Default is false.",
             requiredMode = Schema.RequiredMode.REQUIRED,
             defaultValue = "false")

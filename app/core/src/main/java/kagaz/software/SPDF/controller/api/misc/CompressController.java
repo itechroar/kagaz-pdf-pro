@@ -73,6 +73,13 @@ public class CompressController {
         return 9;
     }
 
+    static int startingLevel(int forTarget, Integer minimum) {
+        if (minimum == null) {
+            return forTarget;
+        }
+        return Math.max(forTarget, Math.min(9, Math.max(1, minimum)));
+    }
+
     // Increment optimization level if we need more compression
     private static int incrementOptimizeLevel(int currentLevel, long currentSize, long targetSize) {
         double currentRatio = currentSize / (double) targetSize;
@@ -134,7 +141,10 @@ public class CompressController {
         try {
             if (autoMode) {
                 double sizeReductionRatio = expectedOutputSize / (double) inputFileSize;
-                optimizeLevel = determineOptimizeLevel(sizeReductionRatio);
+                optimizeLevel =
+                        startingLevel(
+                                determineOptimizeLevel(sizeReductionRatio),
+                                request.getMinOptimizeLevel());
             }
 
             Path workingInput = originalFile;

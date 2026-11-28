@@ -3355,6 +3355,46 @@ unlinkedTitle = "Independent scroll & pan enabled"
 [compare.too.dissimilar]
 message = "These documents appear highly dissimilar. Comparison was stopped to save time."
 
+[compressToSize]
+desc = "Shrink a PDF to a size you choose, in KB or MB."
+submit = "Compress to size"
+tags = "compress to size,target size,reduce to kb,reduce to mb,under 1mb,under 500kb,email size,upload limit,exact size,resize pdf"
+title = "Compression results"
+
+[compressToSize.error]
+failed = "An error occurred while compressing the PDF."
+
+[compressToSize.grayscale]
+desc = "Drops colour to save more space on scans and photos."
+label = "Convert to grayscale"
+
+[compressToSize.settings]
+title = "Size and quality"
+
+[compressToSize.strength]
+title = "Compression strength"
+
+[compressToSize.strength.balanced]
+desc = "Good quality with a noticeably smaller file."
+label = "Balanced"
+
+[compressToSize.strength.extreme]
+desc = "Smallest possible file, lowest quality. Text stays sharp; images may look soft."
+label = "Extreme compression"
+
+[compressToSize.strength.less]
+desc = "Best quality. Compresses only as much as needed to reach the size."
+label = "Less compression"
+
+[compressToSize.strength.more]
+desc = "Smaller file, lower image quality."
+label = "More compression"
+
+[compressToSize.target]
+hint = "Each file is compressed toward this size. Files with little to shrink, or targets far below what the content allows, may end up larger than requested."
+title = "Target file size"
+value = "Size"
+
 [compress]
 desc = "Compress PDFs to reduce their file size."
 submit = "Compress"
@@ -5037,6 +5077,11 @@ title = "Classify"
 desc = "Compares and shows the differences between 2 PDF Documents"
 tags = "difference,compare,diff,compare PDFs,compare documents,find differences,show differences,changes,what changed,track changes,revisions,version compare,side by side,contrast,delta"
 title = "Compare"
+
+[home.compressToSize]
+desc = "Shrink a PDF to a size you choose, in KB or MB."
+tags = "compress to size,target size,reduce to kb,reduce to mb,under 1mb,under 500kb,email size,upload limit,exact size,resize pdf"
+title = "Compress to size"
 
 [home.compress]
 desc = "Compress PDFs to reduce their file size."
