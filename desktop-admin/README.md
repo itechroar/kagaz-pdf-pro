@@ -24,4 +24,4 @@ npm start          # development; needs a staged server in resources/ for the lo
 npm run dist       # installer
 ```
 
-`src/server.js`, `src/tools.js` and `shims/` are copied from `../desktop` by `npm run sync` so the two apps cannot drift; the copies are git-ignored.
+`src/server.js`, `src/tools.js`, `src/config.js` and `shims/` are copied from `../desktop` by `npm run sync` so the two apps cannot drift; the copies are git-ignored.

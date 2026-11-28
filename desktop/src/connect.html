@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Connect to a server</title>
+<style>
+body{margin:0;padding:22px;font:14px/1.5 system-ui,sans-serif;background:#f6f7f9;color:#1c2330}
+@media(prefers-color-scheme:dark){body{background:#12161d;color:#e6e9ef}}
+h1{font-size:18px;margin:0 0 6px}p{margin:0 0 12px;opacity:.75}
+input{width:100%;padding:9px 10px;border:1px solid #8884;border-radius:8px;background:transparent;color:inherit;font:inherit}
+button{margin-top:12px;padding:9px 16px;border:0;border-radius:8px;background:#c2410c;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+#err{color:#dc2626;margin-top:10px;white-space:pre-wrap}
+</style></head><body>
+<h1>Connect to a hosted server</h1>
+<p>Your account and files stay on that server, so you can sign in with the same credentials on every device.</p>
+<input id="url" placeholder="https://pdf.example.com" autofocus spellcheck="false" autocomplete="off">
+<button id="go">Connect</button><div id="err" role="alert"></div>
+<script src="connect.js"></script>
+</body></html>

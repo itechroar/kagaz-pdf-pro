@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { startServer } = require('./server');
-const { TABS, normalizeServerUrl, isCleartextRemote, loadConfig, saveConfig } = require('./config');
+const { TABS } = require('./tabs');
+const { normalizeServerUrl, isCleartextRemote, loadConfig, saveConfig } = require('./config');
 
 const BAR_HEIGHT = 44;
 const PARTITION = 'persist:kagaz-admin';

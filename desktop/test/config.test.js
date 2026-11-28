@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TABS, normalizeServerUrl, isCleartextRemote, loadConfig, saveConfig } = require('../src/config');
+const { normalizeServerUrl, isCleartextRemote, loadConfig, saveConfig } = require('../src/config');
 
 test('normalizeServerUrl accepts hosts, ports and schemes and keeps only the origin', () => {
   assert.strictEqual(normalizeServerUrl('192.168.1.20:8080'), 'http://192.168.1.20:8080');
@@ -37,9 +37,3 @@ test('config round-trips and rejects junk', () => {
   assert.strictEqual(loadConfig(file), null);
 });
 
-test('the console has the admin sections plus the full user app', () => {
-  const ids = TABS.map((t) => t.id);
-  assert.deepStrictEqual(ids, ['dashboard', 'users', 'tools', 'audit', 'developer', 'app']);
-  assert.ok(TABS.every((t) => t.path.startsWith('/')));
-  assert.strictEqual(TABS.find((t) => t.id === 'app').path, '/');
-});

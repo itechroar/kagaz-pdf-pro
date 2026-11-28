@@ -1,22 +1,25 @@
 'use strict';
-const { app, BrowserWindow, Menu, clipboard, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, net, shell } = require('electron');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { startServer } = require('./server');
 const { serverEnv, missingTools, installCommand, installInTerminal } = require('./tools');
+const { normalizeServerUrl, isCleartextRemote, loadConfig, saveConfig } = require('./config');
 
 const PHONE_PORT = 8080;
 let server = null;
 let win = null;
 let serverDir = '';
 let phoneMode = false;
+let remoteUrl = null;
+let connectWin = null;
 
 const userFile = (name) => path.join(app.getPath('userData'), name);
 const dataDir = () => path.join(app.getPath('userData'), 'data');
 
-/** Password for the shared (phone) mode, generated once and kept so the admin account stays reachable. */
+/** Password of the server's built-in administrator, generated once and kept so that account stays reachable. */
 function phonePassword() {
   const file = userFile('phone-password');
   if (!fs.existsSync(file)) fs.writeFileSync(file, crypto.randomBytes(9).toString('base64url'), { mode: 0o600 });
@@ -65,7 +68,9 @@ async function launch(lan) {
     serverDir,
     dataDir: dataDir(),
     lan,
-    adminPassword: lan ? phonePassword() : '',
+    login: true,
+    signup: true,
+    adminPassword: phonePassword(),
     preferredPort: PHONE_PORT,
   });
   phoneMode = lan;
@@ -126,18 +131,98 @@ function buildMenu() {
     { role: 'editMenu' },
     { role: 'viewMenu' },
     {
-      label: 'Phone',
-      submenu: [{ label: phoneMode ? 'Stop sharing with phone' : 'Use with phone…', click: togglePhoneMode }],
+      label: 'Account',
+      submenu: [
+        { label: 'Connect to a hosted server…', click: openConnectWindow },
+        ...(remoteUrl ? [{ label: 'Use this computer instead', click: useThisComputer }] : []),
+      ],
     },
+    ...(remoteUrl
+      ? []
+      : [{
+          label: 'Phone',
+          submenu: [{ label: phoneMode ? 'Stop sharing with phone' : 'Use with phone…', click: togglePhoneMode }],
+        }]),
     { role: 'windowMenu' },
   ]));
 }
 
+function currentOrigin() {
+  if (remoteUrl) return remoteUrl;
+  return server ? `http://127.0.0.1:${server.port}` : '';
+}
+
+function openConnectWindow() {
+  if (connectWin) { connectWin.focus(); return; }
+  connectWin = new BrowserWindow({
+    width: 480, height: 300, parent: win, modal: true, resizable: false, minimizable: false,
+    title: 'Connect to a server', autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'connect-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  connectWin.removeMenu();
+  connectWin.on('closed', () => { connectWin = null; });
+  connectWin.loadFile(path.join(__dirname, 'connect.html'));
+}
+
+async function probeLogin(origin) {
+  let res;
+  try {
+    res = await net.fetch(`${origin}/api/v1/auth/status`);
+  } catch (e) {
+    return `Cannot reach ${origin}.\n${e.message}`;
+  }
+  const body = await res.json().catch(() => null);
+  return res.ok && body && body.loginEnabled === true
+    ? null
+    : 'That address is not a Kagaz PDF server with sign-in enabled.';
+}
+
+ipcMain.handle('connect-server', async (event, input) => {
+  if (!connectWin || event.sender !== connectWin.webContents) return { error: 'Not allowed' };
+  const url = normalizeServerUrl(input);
+  if (!url) return { error: 'Enter a valid address, for example https://pdf.example.com' };
+  if (isCleartextRemote(url)) {
+    const { response } = await dialog.showMessageBox(connectWin, {
+      type: 'warning',
+      message: 'This connection is not encrypted.',
+      detail: 'Your password would travel over the network in plain text. Prefer an https address.',
+      buttons: ['Connect anyway', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (response !== 0) return { error: '' };
+  }
+  const problem = await probeLogin(url);
+  if (problem) return { error: problem };
+  saveConfig(userFile('server.json'), { mode: 'remote', url });
+  if (server) { server.stop(); server = null; }
+  phoneMode = false;
+  remoteUrl = url;
+  buildMenu();
+  const closing = connectWin;
+  connectWin = null;
+  closing.close();
+  win.loadURL(url);
+  return {};
+});
+
+async function useThisComputer() {
+  saveConfig(userFile('server.json'), { mode: 'local' });
+  remoteUrl = null;
+  try {
+    win.loadURL(await launch(false));
+  } catch (e) {
+    dialog.showErrorBox('Could not start the local server', String(e.message || e));
+  }
+}
+
 async function createWindow() {
   serverDir = app.isPackaged ? path.join(process.resourcesPath, 'server') : path.join(__dirname, '..', 'resources');
+  const saved = loadConfig(userFile('server.json'));
+  remoteUrl = saved && saved.mode === 'remote' ? saved.url : null;
   let origin;
   try {
-    origin = await launch(false);
+    if (remoteUrl) { origin = remoteUrl; buildMenu(); } else { origin = await launch(false); }
   } catch (e) {
     dialog.showErrorBox('Kagaz PDF could not start', String(e.message || e));
     app.quit();
@@ -147,7 +232,7 @@ async function createWindow() {
     width: 1400, height: 900, title: 'Kagaz PDF',
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-  const isLocal = (url) => server && url.startsWith(`http://127.0.0.1:${server.port}`);
+  const isLocal = (url) => { const o = currentOrigin(); return o !== '' && new URL(url).origin === o; };
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (!isLocal(url)) shell.openExternal(url);
     return { action: isLocal(url) ? 'allow' : 'deny' };
@@ -156,7 +241,7 @@ async function createWindow() {
     if (!isLocal(url)) { event.preventDefault(); shell.openExternal(url); }
   });
   await win.loadURL(origin);
-  await warnAboutMissingTools();
+  if (!remoteUrl) await warnAboutMissingTools();
 }
 
 app.whenReady().then(createWindow);

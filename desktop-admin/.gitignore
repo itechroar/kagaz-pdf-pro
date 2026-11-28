@@ -1,5 +1,6 @@
 src/server.js
 src/tools.js
+src/config.js
 shims/
 resources/
 dist/
