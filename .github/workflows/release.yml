@@ -61,6 +61,14 @@ jobs:
         run: |
           npm ci
           npx electron-builder --publish never
+      - name: Build administrator installer
+        shell: bash
+        working-directory: desktop-admin
+        run: |
+          mkdir -p resources
+          cp -R ../desktop/resources/. resources/
+          npm ci
+          npm run dist -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.os }}
@@ -69,6 +77,10 @@ jobs:
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
             desktop/dist/*.deb
+            desktop-admin/dist/*.exe
+            desktop-admin/dist/*.dmg
+            desktop-admin/dist/*.AppImage
+            desktop-admin/dist/*.deb
 
   android:
     runs-on: ubuntu-latest

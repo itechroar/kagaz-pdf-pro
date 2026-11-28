@@ -56,6 +56,13 @@ test('buildArgs in phone mode listens on all interfaces with login and a passwor
   assert.ok(a.includes('-Dkagaz.auth.admin-password=pw123'));
 });
 
+test('buildArgs can turn login on while staying on loopback', () => {
+  const a = buildArgs({ jar: '/x/k.jar', port: 1, dataDir: '/d', login: true, adminPassword: 'pw' });
+  assert.ok(a.includes('-Dserver.address=127.0.0.1'));
+  assert.ok(a.includes('-Dsecurity.enableLogin=true'));
+  assert.ok(a.includes('-Dkagaz.auth.admin-password=pw'));
+});
+
 test('freePort falls back when the preferred port is taken', async () => {
   const busy = http.createServer();
   await new Promise((r) => busy.listen(0, '127.0.0.1', r));

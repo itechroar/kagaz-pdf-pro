@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Kagaz PDF Admin</title>
+<style>
+:root{--bg:#0b0f17;--bar:#0f1522;--line:#222c40;--fg:#e4e9f2;--mut:#8b97ad;--acc:#38bdf8;--bad:#f87171}
+@media(prefers-color-scheme:light){:root{--bg:#eef1f6;--bar:#fff;--line:#d8dee9;--fg:#18202f;--mut:#5b6679;--acc:#0369a1;--bad:#b91c1c}}
+*{box-sizing:border-box}html,body{margin:0;height:100%}body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;overflow:hidden}
+#bar{height:44px;display:flex;align-items:stretch;background:var(--bar);border-bottom:1px solid var(--line);padding:0 10px;gap:2px}
+#bar b{align-self:center;margin-right:14px;font-size:14px}#bar b small{color:var(--acc);margin-left:6px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;font-size:10px}
+#tabs{display:flex;gap:2px;align-items:stretch}
+#tabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);font:inherit;padding:0 14px;cursor:pointer}
+#tabs button:hover{color:var(--fg)}#tabs button.on{color:var(--acc);border-bottom-color:var(--acc);font-weight:600}
+#tabs .sep{width:1px;background:var(--line);margin:10px 8px}
+#tools{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mut)}
+#tools button{background:none;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:4px 10px;font:inherit;cursor:pointer}
+#full{display:none;height:100%;align-items:center;justify-content:center;padding:24px}
+.card{width:min(460px,100%);background:var(--bar);border:1px solid var(--line);border-radius:14px;padding:26px}
+h1{margin:0 0 4px;font-size:20px}p{color:var(--mut);margin:4px 0 14px}
+.choice{display:block;width:100%;text-align:left;margin:8px 0;padding:12px 14px;background:var(--bg);border:1px solid var(--line);border-radius:10px;color:var(--fg);font:inherit;cursor:pointer}
+.choice:hover,.choice.on{border-color:var(--acc)}.choice small{display:block;color:var(--mut)}
+input{width:100%;padding:9px 10px;margin:6px 0 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+#go{padding:9px 18px;border:0;border-radius:8px;background:var(--acc);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+#err{color:var(--bad);white-space:pre-wrap;margin-top:12px;min-height:1.2em}
+.spin{width:26px;height:26px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:s 1s linear infinite;margin:0 auto 14px}@keyframes s{to{transform:rotate(360deg)}}
+body.full #bar{display:none}body.full #full{display:flex}
+</style></head>
+<body>
+<div id="bar"><b>Kagaz PDF<small>Admin</small></b><div id="tabs"></div>
+<div id="tools"><span id="where"></span><button id="reload" title="Reload this section">Reload</button><button id="change">Server…</button></div></div>
+<div id="full"><div class="card">
+<div id="busy" hidden><div class="spin"></div><p id="busyText" style="text-align:center"></p></div>
+<div id="setup" hidden>
+<h1>Kagaz PDF Admin</h1><p>Choose which server to manage.</p>
+<button class="choice" id="local">Run on this computer<small>Starts a private server here and signs you in as its administrator.</small></button>
+<button class="choice" id="remote">Connect to a server<small>Manage a Kagaz PDF server on your network or the internet. It must have login enabled.</small></button>
+<div id="remoteForm" hidden><label for="url">Server address</label><input id="url" placeholder="https://pdf.example.com or 192.168.1.20:8080" autocomplete="off" spellcheck="false"><button id="go">Connect</button></div>
+<div id="err" role="alert"></div>
+</div></div></div>
+<script src="shell.js"></script>
+</body></html>

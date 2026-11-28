@@ -33,6 +33,10 @@ jobs:
           node-version: 22
       - run: npm test
         working-directory: desktop
+      - run: npm test
+        working-directory: desktop-admin
+      - run: node --check src/main.js && node --check src/shell.js && node --check src/preload.js
+        working-directory: desktop-admin
 
   backend:
     runs-on: ubuntu-latest

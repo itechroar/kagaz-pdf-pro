@@ -37,15 +37,16 @@ function logTail(logPath, maxChars = 1200) {
 
 /**
  * JVM arguments. Default is loopback-only with login off (single local user). With `lan` set the
- * server listens on all interfaces, so login is forced on with the given admin password.
+ * server listens on all interfaces, so login is on with the given admin password. `login` alone
+ * keeps the loopback binding but turns login on, for the administrator console.
  */
-function buildArgs({ jar, port, dataDir, lan = false, adminPassword = '' }) {
+function buildArgs({ jar, port, dataDir, lan = false, login = lan, adminPassword = '' }) {
   return [
     '-Xmx1g',
     `-Dserver.port=${port}`,
     `-Dserver.address=${lan ? '0.0.0.0' : '127.0.0.1'}`,
-    `-Dsecurity.enableLogin=${lan ? 'true' : 'false'}`,
-    ...(lan && adminPassword ? [`-Dkagaz.auth.admin-password=${adminPassword}`] : []),
+    `-Dsecurity.enableLogin=${login ? 'true' : 'false'}`,
+    ...(login && adminPassword ? [`-Dkagaz.auth.admin-password=${adminPassword}`] : []),
     `-Dkagaz.base-path=${dataDir}${path.sep}`,
     '-jar',
     jar,
@@ -74,14 +75,14 @@ function waitForServer(port, timeoutMs = 240000, intervalMs = 500, isCancelled =
   });
 }
 
-async function startServer({ serverDir, dataDir, lan = false, adminPassword = '', preferredPort = 0 }) {
+async function startServer({ serverDir, dataDir, lan = false, login = lan, adminPassword = '', preferredPort = 0 }) {
   const jar = path.join(serverDir, 'kagaz-pdf.jar');
   if (!fs.existsSync(jar)) throw new Error(`Server jar not found: ${jar}`);
   fs.mkdirSync(dataDir, { recursive: true });
   const port = await freePort(lan ? preferredPort : 0);
   const logPath = path.join(dataDir, 'server.log');
   const logFd = fs.openSync(logPath, 'w');
-  const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir, lan, adminPassword }), {
+  const child = spawn(javaBinary(serverDir), buildArgs({ jar, port, dataDir, lan, login, adminPassword }), {
     cwd: dataDir,
     env: serverEnv(process.platform, process.env, serverDir),
     stdio: ['ignore', logFd, logFd],

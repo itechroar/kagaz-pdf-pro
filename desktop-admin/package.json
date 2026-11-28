@@ -1,0 +1,59 @@
+{
+  "name": "kagaz-pdf-admin",
+  "version": "1.0.3",
+  "description": "Administrator console for Kagaz PDF: dashboard, user and tool management, and the full user app in one desktop window",
+  "license": "Apache-2.0",
+  "main": "src/main.js",
+  "scripts": {
+    "sync": "node scripts/sync.js",
+    "start": "npm run sync && electron .",
+    "test": "npm run sync && node --test \"test/*.test.js\"",
+    "dist": "npm run sync && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "org.kagazpdf.admin",
+    "productName": "Kagaz PDF Admin",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/",
+        "to": "server/",
+        "filter": [
+          "kagaz-pdf.jar",
+          "jre/**/*"
+        ]
+      },
+      {
+        "from": "shims/",
+        "to": "server/shims/"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "maintainer": "Kagaz Software Inc PDF <noreply@users.noreply.github.com>"
+    },
+    "artifactName": "KagazPDFAdmin-${version}-${os}-${arch}.${ext}"
+  },
+  "homepage": "https://github.com/itechroar/kagaz-pdf-pro",
+  "author": {
+    "name": "Kagaz Software Inc PDF",
+    "email": "noreply@users.noreply.github.com"
+  }
+}
