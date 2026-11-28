@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin console · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/dashboard.css"></head>
+<body>
+<aside>
+<div class="brand">Kagaz PDF<small>Admin console</small></div>
+<nav id="tabs">
+<button data-tab="overview" class="on">Overview</button>
+<button data-tab="live">Live activity</button>
+<button data-tab="users">Users</button>
+<button data-tab="tools">Tool usage</button>
+</nav>
+<nav class="manage">
+<a href="/admin-users.html">Manage users</a>
+<a href="/admin-features.html">Manage tools</a>
+<a href="/admin-audit.html">Audit log</a>
+<a href="/developer.html">Developer</a>
+<a href="/">Open the app</a>
+<a href="#" id="out">Sign out</a>
+</nav>
+</aside>
+<main>
+<header><h1 id="title">Overview</h1><div id="conn" class="pill off">connecting…</div></header>
+<div class="err" id="msg" role="alert"></div>
+
+<section id="overview">
+<div class="kpis" id="kpis"></div>
+<div class="panel"><h2>Tool runs per minute <small>last 30 minutes</small></h2><div id="spark" class="spark"></div></div>
+<div class="grid2">
+<div class="panel"><h2>Most used tools <small>last 24 h</small></h2><table><tbody id="topTools"></tbody></table></div>
+<div class="panel"><h2>Latest activity</h2><ul class="feed" id="miniFeed"></ul></div>
+</div>
+</section>
+
+<section id="live" hidden>
+<div class="panel"><div class="bar"><select id="kind"><option value="all">Everything</option><option value="login">Sign-ins</option><option value="signup">Sign-ups</option><option value="tool">Tool runs</option><option value="admin">Admin actions</option></select><input id="who" placeholder="Filter by user"></div>
+<ul class="feed" id="feed"></ul></div>
+</section>
+
+<section id="users" hidden>
+<div class="panel"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Sign-ins</th><th>Failed</th><th>Tool runs</th><th>Last tool</th><th>Last active</th></tr></thead><tbody id="userRows"></tbody></table></div>
+</section>
+
+<section id="tools" hidden>
+<div class="panel"><table><thead><tr><th>Tool</th><th>Runs</th><th>Failed</th><th>Users</th></tr></thead><tbody id="toolRows"></tbody></table></div>
+</section>
+</main>
+<script src="/kagaz-auth/dashboard.js"></script>
+</body></html>

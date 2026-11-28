@@ -56,6 +56,9 @@ public class AuthController {
         }
     }
 
+    @org.springframework.beans.factory.annotation.Value("${kagaz.auth.signup.enabled:false}")
+    private boolean signupEnabled;
+
     private final UserStore store;
     private final LoginLimiter limiter;
     private final ApplicationEventPublisher events;
@@ -82,8 +85,16 @@ public class AuthController {
     public Map<String, Object> status() {
         OidcService sso = oidc.getIfAvailable();
         return sso == null
-                ? Map.of("loginEnabled", true, "sso", false)
-                : Map.of("loginEnabled", true, "sso", true, "ssoLabel", sso.label());
+                ? Map.of("loginEnabled", true, "sso", false, "signup", signupEnabled)
+                : Map.of(
+                        "loginEnabled",
+                        true,
+                        "sso",
+                        true,
+                        "ssoLabel",
+                        sso.label(),
+                        "signup",
+                        signupEnabled);
     }
 
     @PostMapping("/login")
