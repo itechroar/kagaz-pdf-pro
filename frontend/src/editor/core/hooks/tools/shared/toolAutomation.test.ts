@@ -43,7 +43,7 @@ function entry(over: Partial<ToolRegistryEntry>): ToolRegistryEntry {
     component: null,
     description: "",
     categoryId: ToolCategoryId.RECOMMENDED_TOOLS,
-    subcategoryId: SubcategoryId.GENERAL,
+    subcategoryId: SubcategoryId.FREQUENTLY_USED,
     automationSettings: null,
     ...over,
   };

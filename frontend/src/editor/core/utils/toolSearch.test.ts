@@ -14,7 +14,7 @@ function makeEntry(name: string, tags: string): ToolRegistryEntry {
     component: null,
     description: "",
     categoryId: ToolCategoryId.STANDARD_TOOLS,
-    subcategoryId: SubcategoryId.GENERAL,
+    subcategoryId: SubcategoryId.FREQUENTLY_USED,
     automationSettings: null,
     synonyms: tags.split(","),
   };

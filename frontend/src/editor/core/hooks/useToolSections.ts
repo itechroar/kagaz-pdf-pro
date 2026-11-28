@@ -98,6 +98,12 @@ export function useToolSections(
               id === "multiTool",
           );
           quick[subcategoryId].push(...readyTools);
+          readyTools.forEach((entry) => {
+            const also = entry.tool.alsoListedIn;
+            if (!also) return;
+            if (!all[also]) all[also] = [];
+            all[also].push(entry);
+          });
         });
       }
     });

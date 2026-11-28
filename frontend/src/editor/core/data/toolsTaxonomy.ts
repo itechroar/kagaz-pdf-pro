@@ -18,17 +18,15 @@ import {
 import { ProprietaryToolId } from "@editor/types/proprietaryToolId";
 
 export enum SubcategoryId {
+  FREQUENTLY_USED = "frequentlyUsed",
+  EDIT = "edit",
+  ORGANIZE = "organize",
+  OPTIMIZE_REPAIR = "optimizeRepair",
+  SECURITY_PRIVACY = "securityPrivacy",
+  VIEW_CHECK = "viewCheck",
+  CONVERT = "convert",
   AI = "ai",
-  SIGNING = "signing",
-  DOCUMENT_SECURITY = "documentSecurity",
-  VERIFICATION = "verification",
-  DOCUMENT_REVIEW = "documentReview",
-  PAGE_FORMATTING = "pageFormatting",
-  EXTRACTION = "extraction",
-  REMOVAL = "removal",
   AUTOMATION = "automation",
-  GENERAL = "general",
-  ADVANCED_FORMATTING = "advancedFormatting",
   DEVELOPER_TOOLS = "developerTools",
 }
 
@@ -47,6 +45,8 @@ export type ToolRegistryEntry = {
   description: string;
   categoryId: ToolCategoryId;
   subcategoryId: SubcategoryId;
+  /** Second home in the full tool list for a tool whose main listing is Frequently used. */
+  alsoListedIn?: SubcategoryId;
   maxFiles?: number;
   supportedFormats?: string[];
   endpoints?: string[];
@@ -85,33 +85,28 @@ export type ProprietaryToolRegistry = Record<
 >;
 
 export const SUBCATEGORY_ORDER: SubcategoryId[] = [
-  // First: AI steps are the ones a user is least likely to know exist.
+  SubcategoryId.FREQUENTLY_USED,
+  SubcategoryId.EDIT,
+  SubcategoryId.ORGANIZE,
+  SubcategoryId.OPTIMIZE_REPAIR,
+  SubcategoryId.SECURITY_PRIVACY,
+  SubcategoryId.VIEW_CHECK,
+  SubcategoryId.CONVERT,
   SubcategoryId.AI,
-  SubcategoryId.SIGNING,
-  SubcategoryId.DOCUMENT_SECURITY,
-  SubcategoryId.VERIFICATION,
-  SubcategoryId.DOCUMENT_REVIEW,
-  SubcategoryId.PAGE_FORMATTING,
-  SubcategoryId.EXTRACTION,
-  SubcategoryId.REMOVAL,
   SubcategoryId.AUTOMATION,
-  SubcategoryId.GENERAL,
-  SubcategoryId.ADVANCED_FORMATTING,
   SubcategoryId.DEVELOPER_TOOLS,
 ];
 
 export const SUBCATEGORY_COLOR_MAP: Record<SubcategoryId, string> = {
+  [SubcategoryId.FREQUENTLY_USED]: "var(--category-color-general)", // Blue
+  [SubcategoryId.EDIT]: "var(--category-color-formatting)", // Purple
+  [SubcategoryId.ORGANIZE]: "var(--category-color-extraction)", // Cyan
+  [SubcategoryId.OPTIMIZE_REPAIR]: "var(--category-color-removal)", // Red
+  [SubcategoryId.SECURITY_PRIVACY]: "var(--category-color-security)", // Orange
+  [SubcategoryId.VIEW_CHECK]: "var(--category-color-verification)", // Orange
+  [SubcategoryId.CONVERT]: "var(--category-color-signing)", // Green
   [SubcategoryId.AI]: "var(--category-color-automation)", // Pink
-  [SubcategoryId.SIGNING]: "var(--category-color-signing)", // Green
-  [SubcategoryId.DOCUMENT_SECURITY]: "var(--category-color-security)", // Orange
-  [SubcategoryId.VERIFICATION]: "var(--category-color-verification)", // Orange
-  [SubcategoryId.DOCUMENT_REVIEW]: "var(--category-color-general)", // Blue
-  [SubcategoryId.PAGE_FORMATTING]: "var(--category-color-formatting)", // Purple
-  [SubcategoryId.EXTRACTION]: "var(--category-color-extraction)", // Cyan
-  [SubcategoryId.REMOVAL]: "var(--category-color-removal)", // Red
   [SubcategoryId.AUTOMATION]: "var(--category-color-automation)", // Pink
-  [SubcategoryId.GENERAL]: "var(--category-color-general)", // Blue
-  [SubcategoryId.ADVANCED_FORMATTING]: "var(--category-color-formatting)", // Purple
   [SubcategoryId.DEVELOPER_TOOLS]: "var(--category-color-developer)", // Gray
 };
 
@@ -119,28 +114,24 @@ export const getSubcategoryIcon = (
   subcategory: SubcategoryId,
 ): React.ReactNode => {
   switch (subcategory) {
-    case SubcategoryId.SIGNING:
+    case SubcategoryId.FREQUENTLY_USED:
+      return React.createElement(Icon, { name: "star" });
+    case SubcategoryId.EDIT:
       return React.createElement(Icon, { name: "pen-tool" });
-    // Siblings in the same picker list, so they must not share a glyph:
-    // security is the bare shield, verification the one with the tick.
-    case SubcategoryId.DOCUMENT_SECURITY:
-      return React.createElement(Icon, { name: "shield" });
-    case SubcategoryId.VERIFICATION:
-      return React.createElement(Icon, { name: "shield-check" });
-    case SubcategoryId.DOCUMENT_REVIEW:
-      return React.createElement(Icon, { name: "message-square-text" });
-    case SubcategoryId.PAGE_FORMATTING:
+    case SubcategoryId.ORGANIZE:
       return React.createElement(Icon, { name: "rows-3" });
-    case SubcategoryId.EXTRACTION:
-      return React.createElement(Icon, { name: "download" });
-    case SubcategoryId.REMOVAL:
-      return React.createElement(Icon, { name: "trash" });
+    case SubcategoryId.OPTIMIZE_REPAIR:
+      return React.createElement(Icon, { name: "wrench" });
+    // Siblings in the same picker list, so they must not share a glyph:
+    // security is the bare shield, view & check the one with the tick.
+    case SubcategoryId.SECURITY_PRIVACY:
+      return React.createElement(Icon, { name: "shield" });
+    case SubcategoryId.VIEW_CHECK:
+      return React.createElement(Icon, { name: "shield-check" });
+    case SubcategoryId.CONVERT:
+      return React.createElement(Icon, { name: "file-convert" });
     case SubcategoryId.AUTOMATION:
       return React.createElement(Icon, { name: "bot" });
-    case SubcategoryId.GENERAL:
-      return React.createElement(Icon, { name: "wrench" });
-    case SubcategoryId.ADVANCED_FORMATTING:
-      return React.createElement(Icon, { name: "sliders-horizontal" });
     case SubcategoryId.DEVELOPER_TOOLS:
       return React.createElement(Icon, { name: "code" });
     default:

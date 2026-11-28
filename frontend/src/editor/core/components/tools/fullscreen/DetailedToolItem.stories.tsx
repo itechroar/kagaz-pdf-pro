@@ -73,7 +73,7 @@ const mockTool: ToolRegistryEntry = {
   component: null,
   description: "Split a PDF into multiple files",
   categoryId: ToolCategoryId.STANDARD_TOOLS,
-  subcategoryId: SubcategoryId.GENERAL,
+  subcategoryId: SubcategoryId.FREQUENTLY_USED,
   automationSettings: null,
 };
 

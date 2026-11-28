@@ -58,7 +58,7 @@ const registryWithSettings: Partial<ToolRegistry> = {
     component: null,
     description: "Automatically rename files.",
     categoryId: ToolCategoryId.STANDARD_TOOLS,
-    subcategoryId: SubcategoryId.GENERAL,
+    subcategoryId: SubcategoryId.FREQUENTLY_USED,
     automationSettings: DemoSettings,
   },
 };
