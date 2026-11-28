@@ -194,7 +194,7 @@ class EndpointConfigurationGapTest {
         void disabledWithoutTagger() {
             EndpointConfiguration config = build(false, null);
             assertFalse(config.isEndpointEnabled("pdf-to-ua"));
-            assertFalse(config.isEndpointEnabled("accessibility-report"));
+            assertTrue(config.isEndpointEnabled("accessibility-report"));
         }
 
         @Test
@@ -473,13 +473,10 @@ class EndpointConfigurationGapTest {
 
         @Test
         @DisplayName(
-                "form-detection defaults to disabled with DEPENDENCY when the proprietary module is absent")
-        void formDetectionDisabledWithoutProprietaryModule() {
+                "form-detection is on by default: the controller ships in this build")
+        void formDetectionEnabledByDefault() {
             EndpointConfiguration config = buildDefault();
-            assertFalse(config.isEndpointEnabled("form-detection"));
-            assertEquals(
-                    DisableReason.DEPENDENCY,
-                    config.getEndpointAvailability("form-detection").getReason());
+            assertTrue(config.isEndpointEnabled("form-detection"));
         }
 
         @Test

@@ -589,7 +589,6 @@ public class EndpointConfiguration {
         // veraPDF dependent endpoints
         addEndpointToGroup("veraPDF", "verify-pdf");
         addEndpointToGroup("veraPDF", "pdf-to-ua");
-        addEndpointToGroup("veraPDF", "accessibility-report");
         addEndpointToGroup("veraPDF", "validate-compliance");
     }
 
@@ -616,13 +615,8 @@ public class EndpointConfiguration {
         }
 
         if (!pdfUaAvailable) {
-            disableEndpoint("pdf-to-ua");
-            disableEndpoint("accessibility-report");
+            disableEndpoint("pdf-to-ua", DisableReason.DEPENDENCY);
         }
-
-        // Only FormDetectionModelManager (proprietary) can enable this; default it off so a core
-        // build does not advertise a tool whose controller is not on the classpath.
-        disableEndpoint("form-detection", DisableReason.DEPENDENCY);
 
         if (!applicationProperties.getSystem().isEnableUrlToPDF()) {
             disableEndpoint("url-to-pdf");
@@ -631,6 +625,21 @@ public class EndpointConfiguration {
 
     public Set<String> getEndpointsForGroup(String group) {
         return endpointGroups.getOrDefault(group, new HashSet<>());
+    }
+
+    public Set<String> getAllGroups() {
+        return new java.util.TreeSet<>(endpointGroups.keySet());
+    }
+
+    /** Why a group is off, or {@code null} when it is not disabled. */
+    public DisableReason getGroupDisableReason(String group) {
+        return disabledGroups.contains(group)
+                ? groupDisableReasons.getOrDefault(group, DisableReason.CONFIG)
+                : null;
+    }
+
+    public boolean isToolDependencyGroup(String group) {
+        return isToolGroup(group);
     }
 
     public Set<String> getAllEndpoints() {

@@ -27,7 +27,7 @@ public class SecurityHeadersFilter extends OncePerRequestFilter {
                     + " frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
 
     private static final String[] CSP_PAGES = {
-        "/login.html", "/admin-users.html", "/admin-audit.html", "/developer.html", "/ai.html"
+        "/login.html", "/admin-users.html", "/admin-audit.html", "/admin-features.html", "/developer.html", "/ai.html"
     };
 
     @Override

@@ -84,6 +84,7 @@ public class AuthFilter extends OncePerRequestFilter {
         }
         if ((path.equals("/admin-users.html")
                         || path.equals("/admin-audit.html")
+                        || path.equals("/admin-features.html")
                         || path.startsWith("/api/v1/auth/admin/"))
                 && u.role() != UserStore.Role.ADMIN) {
             json(response, 403, "forbidden", "Administrator access required");

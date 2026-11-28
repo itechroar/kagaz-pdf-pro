@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tools · Kagaz PDF</title><link rel="stylesheet" href="/kagaz-auth/auth.css"></head>
+<body><main class="wide">
+<nav><a href="/">← Back to tools</a><a href="/admin-users.html">Users</a><a href="/admin-audit.html">Audit log</a></nav>
+<div class="card"><h1>Manage tools</h1>
+<p>Switch tools or whole groups on or off for everyone. Choices are saved and survive restarts. A tool shown as <em>missing dependency</em> needs a program or module that is not installed on this server and cannot be switched on here.</p>
+<div class="row">
+<div><label for="q">Search</label><input id="q" placeholder="e.g. ocr, form, accessibility"></div>
+<div><label for="f">Show</label><select id="f"><option value="all">All</option><option value="on">Enabled</option><option value="off">Disabled</option><option value="mine">Switched off by an administrator</option></select></div>
+<button type="button" id="reset">Restore defaults</button></div>
+<div class="err" id="msg" role="alert"></div>
+<h2>Groups</h2>
+<table><thead><tr><th>Group</th><th>Tools</th><th>Status</th><th></th></tr></thead><tbody id="groups"></tbody></table>
+<h2>Tools</h2>
+<table><thead><tr><th>Tool</th><th>Status</th><th></th></tr></thead><tbody id="tools"></tbody></table>
+</div></main><script src="/kagaz-auth/features.js"></script></body></html>
